@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pumpbot"
+version = "0.1.0"
+description = "Telegram pump-channel signal research and trading harness"
+requires-python = ">=3.11"
+dependencies = [
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+live = ["telethon>=1.36", "aiohttp>=3.9", "orjson>=3.10", "uvloop>=0.19; sys_platform != 'win32'"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+pumpbot = "pumpbot.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

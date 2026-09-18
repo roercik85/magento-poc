@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.session
+*.session-journal
+config.yaml
+secrets.yaml
+.env
+runs/*/
+!runs/.gitkeep
+state/
+data/recorded/

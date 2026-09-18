@@ -1,0 +1,166 @@
+# ===========================================================================
+#  pumpbot — configuration
+#  Copy to config.yaml and edit. config.yaml is gitignored.
+# ===========================================================================
+
+mode: simulate          # simulate | record | live   (live is gated, see gate:)
+run_label: "baseline"
+
+# ---------------------------------------------------------------------------
+# Telegram ingestion (MTProto user client — NOT the Bot API, which is slower
+# and cannot read arbitrary channels).
+# Get api_id / api_hash from https://my.telegram.org -> API development tools.
+# ---------------------------------------------------------------------------
+telegram:
+  api_id: 0
+  api_hash: ""
+  session_name: "state/pumpbot"
+
+  # Multiple sessions across different accounts/DCs. The engine dedupes by
+  # (chat_id, message_id) and keeps whichever arrives first. This is the single
+  # cheapest latency win available: different accounts land on different
+  # Telegram data centres and the spread between them is routinely 30-120 ms.
+  extra_sessions: []
+  # - session_name: "state/pumpbot_dc2"
+  #   api_id: 0
+  #   api_hash: ""
+
+  # Channels to listen on. Empty list = every channel the account has joined.
+  # Use numeric ids where possible: resolving @usernames costs an RPC round
+  # trip, and we refuse to do that on the hot path.
+  channels: []
+  # - id: -1001234567890
+  #   name: "example_calls"
+  #   tier: candidate        # candidate | trusted | blocked
+
+  # React to edited messages too. Many channels post a placeholder ("NEXT CALL
+  # IN 60s") and then *edit* in the ticker — the edit is the real signal and is
+  # often several seconds ahead of anyone reading the channel by eye.
+  watch_edits: true
+
+# ---------------------------------------------------------------------------
+# Signal parsing
+# ---------------------------------------------------------------------------
+parsing:
+  min_confidence: 0.55
+  # Tickers that are never a pump call — majors and stables. Matching one of
+  # these is treated as noise.
+  ignore_symbols: [BTC, ETH, USDT, USDC, BNB, SOL, XRP, ADA, DOGE, TRX, DAI,
+                   BUSD, TUSD, WBTC, WETH, STETH, LINK, MATIC, DOT, AVAX]
+  quote_assets: [USDT, USDC, FDUSD, BTC]
+  # Accept Solana/EVM contract addresses as a signal target.
+  accept_contracts: true
+
+# ---------------------------------------------------------------------------
+# Market data (used for simulated fills, mark-to-market and channel scoring)
+# ---------------------------------------------------------------------------
+marketdata:
+  venue: binance
+  rest_base: "https://api.binance.com"
+  ws_base: "wss://stream.binance.com:9443"
+  # Poll interval for the post-signal return curve used by the channel scorer.
+  return_horizons_s: [5, 15, 30, 60, 300, 900, 3600]
+
+# ---------------------------------------------------------------------------
+# Execution
+# ---------------------------------------------------------------------------
+execution:
+  venue: binance
+  # Simulated execution model. These numbers decide whether your backtest is
+  # honest or a fairy tale. Defaults are deliberately pessimistic.
+  simulation:
+    # End-to-end latency from "message hits our socket" to "order rests on the
+    # book", in milliseconds. Sampled from a lognormal per trade.
+    latency_ms_median: 220
+    latency_ms_sigma: 0.55
+    # Extra latency the *signal itself* took to reach us (Telegram fanout).
+    telegram_fanout_ms_median: 90
+    telegram_fanout_ms_sigma: 0.6
+    # Slippage model: bps of adverse fill = base + impact * (notional / depth)
+    slippage_bps_base: 35
+    slippage_impact_coeff: 250
+    # Assumed top-of-book depth in quote currency for a low-cap pump target.
+    assumed_depth_quote: 25000
+    taker_fee_bps: 10
+    # Probability the order is simply rejected (symbol halted, no liquidity,
+    # exchange rate-limits you at exactly the wrong moment).
+    reject_probability: 0.04
+
+  live:
+    api_key_env: "PUMPBOT_API_KEY"
+    api_secret_env: "PUMPBOT_API_SECRET"
+    recv_window_ms: 5000
+    # Hard ceiling enforced in code, independent of risk config.
+    max_notional_quote_hard_cap: 100.0
+
+# ---------------------------------------------------------------------------
+# Risk
+# ---------------------------------------------------------------------------
+risk:
+  quote_asset: USDT
+  starting_equity: 1000.0
+  position_notional_quote: 50.0       # per trade
+  max_concurrent_positions: 3
+  max_trades_per_run: 50
+  # Stop the run entirely if cumulative PnL drops below this fraction of start.
+  daily_drawdown_stop_pct: 10.0
+  # Never take the same symbol twice inside this window.
+  symbol_cooldown_s: 900
+  # Only trade channels whose score is at least this. 0 = trade everything
+  # (use for the discovery phase, never for live).
+  min_channel_score: 0.0
+  blocked_symbols: []
+
+# ---------------------------------------------------------------------------
+# Strategy — pump entries decay fast. The exit ladder matters more than entry.
+# ---------------------------------------------------------------------------
+strategy:
+  take_profit_ladder:                 # fraction of position sold at each level
+    - { gain_pct: 4.0,  fraction: 0.40 }
+    - { gain_pct: 9.0,  fraction: 0.35 }
+    - { gain_pct: 20.0, fraction: 0.25 }
+  stop_loss_pct: 6.0
+  # Trailing stop arms once the first ladder rung is hit.
+  trailing_stop_pct: 5.0
+  # Hard time exit. Pump spikes are typically over inside 2 minutes; holding
+  # past that is how paper profits become real losses.
+  max_hold_s: 180
+  # Abort entry if price already moved this much between the message timestamp
+  # and our fill — that means we are the exit liquidity, not the entry.
+  max_entry_chase_pct: 8.0
+
+# ---------------------------------------------------------------------------
+# Channel scoring
+# ---------------------------------------------------------------------------
+scoring:
+  min_signals_for_score: 12
+  # Horizon used as the headline "did this call work" measure. This must match
+  # how long you actually intend to hold. Pump spikes peak roughly 30-40 s after
+  # the post and then give it all back, so scoring at 60 s marks even good
+  # channels as losers — you would be measuring a trade you never take. The
+  # report also prints each channel's own best horizon; use that to set this.
+  primary_horizon_s: 30
+  # A channel that consistently posts *after* the move started is a relay,
+  # not an originator. Penalise it.
+  relay_penalty_weight: 0.35
+  # Weights for the composite score (must sum to 1.0).
+  weights:
+    hit_rate: 0.30
+    median_return: 0.30
+    originator: 0.20
+    consistency: 0.20
+
+# ---------------------------------------------------------------------------
+# Promotion gate: simulate -> live
+# ---------------------------------------------------------------------------
+gate:
+  required_profitable_runs: 10
+  require_consecutive: true
+  min_trades_per_run: 5
+  # A run only counts toward the gate if it cleared this net return.
+  min_net_return_pct: 0.0
+  state_file: "state/gate.json"
+
+reporting:
+  output_dir: "runs"
+  formats: [markdown, json, html]
