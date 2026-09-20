@@ -462,7 +462,8 @@ def cmd_triage(args: argparse.Namespace) -> int:
     import asyncio
 
     cfg = _load(args)
-    _require_telegram(cfg, args.config)
+    if not args.from_export:
+        _require_telegram(cfg, args.config)
     cfg.mode = "simulate"
     cfg.risk.max_trades_per_run = 0              # observe only
 
@@ -477,13 +478,17 @@ def cmd_triage(args: argparse.Namespace) -> int:
 
     async def _go() -> int:
         import aiohttp
-        from telethon import TelegramClient
 
-        from .ingest.history import read_history, screen, summarise
-        from .ingest.telegram import prepare_session_path
+        from .ingest.history import screen, summarise
         from .marketdata.historical import HistoricalFeed
         from .marketdata.kucoin import KucoinSymbols, fetch_klines
         from .parsing.extractor import SignalExtractor
+
+        if not args.from_export:
+            from telethon import TelegramClient
+
+            from .ingest.history import read_history
+            from .ingest.telegram import prepare_session_path
 
         extractor = SignalExtractor(
             ignore_symbols=cfg.parsing.ignore_symbols,
@@ -492,47 +497,69 @@ def cmd_triage(args: argparse.Namespace) -> int:
             min_confidence=cfg.parsing.min_confidence,
         )
 
-        client = TelegramClient(
-            prepare_session_path(cfg.telegram.session_name),
-            cfg.telegram.api_id,
-            cfg.telegram.api_hash,
-        )
-        await client.start()
+        if args.from_export:
+            from .ingest.telegram_export import ExportError, read_export
 
-        try:
-            targets = [(c.id, c.name) for c in cfg.telegram.channels
-                       if c.tier != "blocked"]
-            if not targets or args.all_joined:
-                from telethon.tl.types import Channel
-
-                targets = []
-                async for dialog in client.iter_dialogs():
-                    entity = dialog.entity
-                    if isinstance(entity, Channel):
-                        targets.append((int(f"-100{entity.id}"), entity.title or ""))
-                print(f"▸ no channels configured; using {len(targets)} joined channel(s)")
-
-            if not targets:
-                print("error: no channels to triage. Join some, or list them in "
-                      f"telegram.channels in {args.config or 'config.yaml'}.",
-                      file=sys.stderr)
+            try:
+                histories = read_export(args.from_export, days=args.days)
+            except ExportError as exc:
+                print(f"error: {exc}", file=sys.stderr)
                 return 1
-
-            print(f"▸ reading {args.days}d of history from {len(targets)} channel(s)\n")
-            histories = []
-            for chat_id, name in targets:
-                try:
-                    h = await read_history(
-                        client, chat_id, name=name, days=args.days, limit=args.limit
-                    )
-                except Exception as exc:                 # noqa: BLE001
-                    print(f"  ✗ {name or chat_id}: {type(exc).__name__}: {exc}")
-                    continue
-                histories.append(h)
+            print(f"▸ reading {args.days}d from export {args.from_export}\n")
+            for h in histories:
                 print(f"  · {h.name[:34]:<34} {len(h.messages):>5} msgs "
                       f"over {h.span_days:>5.1f}d")
-        finally:
-            await client.disconnect()
+            if not histories:
+                print(f"\nerror: no channel in the export has messages inside "
+                      f"{args.days} days. Try a longer --days, or check that the "
+                      f"export included the channels and their message text.",
+                      file=sys.stderr)
+                return 1
+        else:
+            client = TelegramClient(
+                prepare_session_path(cfg.telegram.session_name),
+                cfg.telegram.api_id,
+                cfg.telegram.api_hash,
+            )
+            await client.start()
+
+            try:
+                targets = [(c.id, c.name) for c in cfg.telegram.channels
+                           if c.tier != "blocked"]
+                if not targets or args.all_joined:
+                    from telethon.tl.types import Channel
+
+                    targets = []
+                    async for dialog in client.iter_dialogs():
+                        entity = dialog.entity
+                        if isinstance(entity, Channel):
+                            targets.append((int(f"-100{entity.id}"), entity.title or ""))
+                    print(f"▸ no channels configured; using {len(targets)} "
+                          f"joined channel(s)")
+
+                if not targets:
+                    print("error: no channels to triage. Join some, or list them in "
+                          f"telegram.channels in {args.config or 'config.yaml'}.",
+                          file=sys.stderr)
+                    return 1
+
+                print(f"▸ reading {args.days}d of history from "
+                      f"{len(targets)} channel(s)\n")
+                histories = []
+                for chat_id, name in targets:
+                    try:
+                        h = await read_history(
+                            client, chat_id, name=name,
+                            days=args.days, limit=args.limit,
+                        )
+                    except Exception as exc:             # noqa: BLE001
+                        print(f"  ✗ {name or chat_id}: {type(exc).__name__}: {exc}")
+                        continue
+                    histories.append(h)
+                    print(f"  · {h.name[:34]:<34} {len(h.messages):>5} msgs "
+                          f"over {h.span_days:>5.1f}d")
+            finally:
+                await client.disconnect()
 
         screens = [screen(h, extractor, min_signals_for_score=args.min_calls)
                    for h in histories]
@@ -1044,6 +1071,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     tr = sub.add_parser("triage",
                         help="judge channels on their history, today — no weeks of recording")
+    tr.add_argument("--from-export", metavar="PATH",
+                    help="read history from a Telegram Desktop JSON export "
+                         "(folder or result.json) instead of the API — needs no "
+                         "login, no api_id, no code")
     tr.add_argument("--days", type=int, default=30, help="how far back to read")
     tr.add_argument("--limit", type=int, default=3000,
                     help="max messages per channel")

@@ -119,6 +119,9 @@ only one that produces information. Run it for **weeks**, not hours.
 
 ```bash
 pumpbot triage --days 30 --write-config shortlist.json
+
+# or with no API login at all, from a Telegram Desktop export:
+pumpbot triage --from-export ~/Downloads/ChatExport --days 30
 ```
 
 **This is what stops you spending weeks on junk.** Telegram serves a channel's
@@ -144,6 +147,14 @@ and whether the call is worth anything 5-15 minutes later.
 
 > Triage ranks channels. It does not tell you what you would have earned.
 > Survivors still need live tick recording before you trade them.
+
+**If the API login will not work**, `--from-export` skips Telegram entirely.
+Login codes for freshly created applications are sometimes accepted by the
+server and then silently never delivered, which leaves nothing to debug.
+Telegram Desktop → Settings → Advanced → Export Telegram data, with
+*Machine-readable JSON* and the channels selected, produces everything triage
+needs and no credentials at all. Recording still needs a working login later,
+but the pass that decides whether any of this is worth doing does not.
 
 ### 4. `fetch-prices` — get the prices to judge against *(Binance only)*
 
@@ -329,6 +340,7 @@ and HTML:
 ```
 ingest/telegram.py    raw MTProto handler, multi-session, dedupe
 ingest/history.py     past messages + structural screen (no prices needed)
+ingest/telegram_export.py   Telegram Desktop JSON — the no-API path
    ↓
 parsing/extractor.py  precompiled patterns, ~25 µs, precision over recall
    ↓
@@ -361,7 +373,7 @@ tell you this strategy prints money. It does not.
 ## Tests
 
 ```bash
-pytest -q        # 189 tests
+pytest -q        # 212 tests
 ```
 
 Covering parser precision (including the false positives that would fire market
