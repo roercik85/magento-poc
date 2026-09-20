@@ -25,7 +25,7 @@ import time
 import uuid
 
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 REST_BASE = "https://api.kucoin.com"
 
@@ -493,3 +493,109 @@ class KucoinRecordingSession:
                 pass
         self._tasks.clear()
         self.bars_written += self.recorder.flush()
+
+
+# ---------------------------------------------------------------------------
+# historical klines
+# ---------------------------------------------------------------------------
+# KuCoin returns candles as [time_s, open, close, high, low, volume, turnover].
+# Note the ordering: close comes *before* high and low, which is not the usual
+# OHLC convention and silently produces nonsense if you assume otherwise.
+_KLINE_TIME, _KLINE_OPEN, _KLINE_CLOSE, _KLINE_HIGH, _KLINE_LOW = 0, 1, 2, 3, 4
+_KLINE_TURNOVER = 6
+
+# Public endpoints are rate limited per IP. A triage pass over a few hundred
+# calls will trip it without pacing, and a 429 mid-run silently truncates the
+# price file, which silently truncates the scoring.
+_KLINE_PACE_S = 0.25
+
+
+async def fetch_klines(
+    session,                                     # noqa: ANN001
+    symbols_and_times: Sequence[Tuple[str, float]],
+    out_path: str | Path,
+    *,
+    rest_base: str = REST_BASE,
+    window_before_s: int = 600,
+    window_after_s: int = 1_800,
+    symbols: Optional[KucoinSymbols] = None,
+    progress=None,                               # noqa: ANN001
+) -> Dict[str, int]:
+    """Fetch 1-minute candles around each (symbol, call time) into a price file.
+
+    This is the retrospective path: it works on calls that already happened,
+    which is what makes a same-day triage pass possible instead of waiting
+    weeks for a live recording.
+
+    **It is one-minute resolution and that is a real limit.** A pump that peaks
+    35 seconds after the post is smeared across two bars, so this cannot tell
+    you what a fast bot would have been filled at. What it measures reliably is
+    the part that does not need sub-minute precision: how far the price had
+    already run *before* the call, and whether the call is still worth anything
+    five or fifteen minutes later. Those two kill most channels on their own.
+    Survivors still need live tick recording before you trade them.
+    """
+    import asyncio
+
+    windows: Dict[str, List[Tuple[int, int]]] = {}
+    for symbol, post_ms in symbols_and_times:
+        venue = symbols.resolve(symbol) if symbols else symbol
+        if venue is None:
+            continue
+        start = int((post_ms - window_before_s * 1000) / 1000)
+        end = int((post_ms + window_after_s * 1000) / 1000)
+        windows.setdefault(venue, []).append((start, end))
+
+    merged: Dict[str, List[Tuple[int, int]]] = {}
+    for venue, spans in windows.items():
+        spans.sort()
+        out: List[Tuple[int, int]] = []
+        for start, end in spans:
+            if out and start <= out[-1][1]:
+                out[-1] = (out[-1][0], max(out[-1][1], end))
+            else:
+                out.append((start, end))
+        merged[venue] = out
+
+    path = Path(out_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("", encoding="utf-8")
+    written: Dict[str, int] = {}
+
+    for venue, spans in merged.items():
+        rows: List[str] = []
+        compact = venue.replace("-", "")
+        for start, end in spans:
+            params = (
+                f"type=1min&symbol={venue}&startAt={start}&endAt={end}"
+            )
+            try:
+                async with session.get(
+                    f"{rest_base}/api/v1/market/candles?{params}"
+                ) as resp:
+                    if resp.status == 429:
+                        await asyncio.sleep(5.0)
+                        continue
+                    payload = await resp.json()
+            except Exception:                    # noqa: BLE001 - delisted, network
+                continue
+
+            for k in payload.get("data") or []:
+                rows.append(json.dumps({
+                    "symbol": compact,
+                    "t_ms": int(k[_KLINE_TIME]) * 1000,
+                    "close": float(k[_KLINE_CLOSE]),
+                    "high": float(k[_KLINE_HIGH]),
+                    "low": float(k[_KLINE_LOW]),
+                    "quote_volume": float(k[_KLINE_TURNOVER]),
+                }))
+            await asyncio.sleep(_KLINE_PACE_S)
+
+        if rows:
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write("\n".join(rows) + "\n")
+        written[compact] = len(rows)
+        if progress is not None:
+            progress(venue, len(rows))
+
+    return written

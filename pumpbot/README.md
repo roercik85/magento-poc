@@ -60,9 +60,10 @@ tests.
 ## The workflow
 
 ```
-discover → record → fetch-prices → score → simulate → gate → live
-   ▲                                  │
-   └──────────────────────────────────┘  iterate until channels earn their place
+discover → triage → record → score → simulate → gate → live
+   ▲          │        │
+   │          │        └─ weeks, but only on channels that survived triage
+   └──────────┘  hours, on history — kills most candidates same day
 ```
 
 ### 1. `discover` — enumerate candidates
@@ -75,7 +76,7 @@ Lists channels the account has joined, plus public search results. **None of
 these are vetted.** Subscriber counts are bought and pinned track records are
 screenshots.
 
-### 2. `record` — gather evidence, trade nothing
+### 2b. `record` — gather evidence, trade nothing
 
 ```bash
 pumpbot record --out data/recorded/corpus.jsonl
@@ -84,7 +85,37 @@ pumpbot record --out data/recorded/corpus.jsonl
 Listens and logs. Places no orders. This is the step people skip and it is the
 only one that produces information. Run it for **weeks**, not hours.
 
-### 3. `fetch-prices` — get the prices to judge against *(Binance only)*
+### 3. `triage` — judge channels on their past, today
+
+```bash
+pumpbot triage --days 30 --write-config shortlist.json
+```
+
+**This is what stops you spending weeks on junk.** Telegram serves a channel's
+history and KuCoin serves one-minute candles at least a year back, so a
+channel's last month of calls can be scored this afternoon.
+
+Two passes. The **structural screen** rejects channels on shape alone, before
+fetching a single price:
+
+| Pattern | What it means |
+|---|---|
+| Pitches a VIP tier | The product is the subscription, not the trading |
+| Forwards most content | A relay — find what it forwards from |
+| "Next call in 10 minutes" | An accumulation window for whoever knows the ticker |
+| 40+ calls a day | Volume, not selection: something it named always went up |
+| Too quiet to ever reach a sample | Cannot be evaluated at all |
+
+Survivors get **priced against one-minute candles**. That resolution cannot
+tell you what a fast bot would have been filled at on a 30-second spike — but
+it answers the two questions that do not need sub-minute precision, and that
+kill most channels anyway: how far the price had already run *before* the call,
+and whether the call is worth anything 5-15 minutes later.
+
+> Triage ranks channels. It does not tell you what you would have earned.
+> Survivors still need live tick recording before you trade them.
+
+### 4. `fetch-prices` — get the prices to judge against *(Binance only)*
 
 ```bash
 pumpbot fetch-prices data/recorded/corpus.jsonl --out data/recorded/prices.jsonl
@@ -110,7 +141,7 @@ listed on your venue, or outside its 1-second kline retention. Those calls are
 dropped rather than treated as flat, which would bias every channel's score
 upward.
 
-### 4. `score` — rank what you recorded
+### 5. `score` — rank what you recorded
 
 ```bash
 pumpbot score data/recorded/corpus.jsonl --prices data/recorded/prices.jsonl \
@@ -120,7 +151,7 @@ pumpbot score data/recorded/corpus.jsonl --prices data/recorded/prices.jsonl \
 Ranks channels and prints a verdict for each. Copy the qualifying ones into
 `config.yaml` as `tier: trusted` and set `risk.min_channel_score`.
 
-### 5. `simulate` — paper trade
+### 6. `simulate` — paper trade
 
 ```bash
 pumpbot simulate --corpus data/recorded/corpus.jsonl --prices data/recorded/prices.jsonl
@@ -132,13 +163,13 @@ pumpbot simulate --corpus data/recorded/corpus.jsonl --prices data/recorded/pric
 scores. **Score on one period and trade on another** — scoring and trading the
 same data is overfitting, and it will flatter you.
 
-### 6. `gate` — see how close you are
+### 7. `gate` — see how close you are
 
 ```bash
 pumpbot gate
 ```
 
-### 7. `live` — real orders
+### 8. `live` — real orders
 
 ```bash
 export PUMPBOT_API_KEY=... PUMPBOT_API_SECRET=...
@@ -267,6 +298,7 @@ and HTML:
 
 ```
 ingest/telegram.py    raw MTProto handler, multi-session, dedupe
+ingest/history.py     past messages + structural screen (no prices needed)
    ↓
 parsing/extractor.py  precompiled patterns, ~25 µs, precision over recall
    ↓
@@ -299,7 +331,7 @@ tell you this strategy prints money. It does not.
 ## Tests
 
 ```bash
-pytest -q        # 139 tests
+pytest -q        # 174 tests
 ```
 
 Covering parser precision (including the false positives that would fire market

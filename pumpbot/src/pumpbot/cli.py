@@ -298,6 +298,217 @@ def cmd_discover(args: argparse.Namespace) -> int:
     return asyncio.run(_go())
 
 
+def cmd_triage(args: argparse.Namespace) -> int:
+    """Judge channels on their past, today, instead of recording for weeks.
+
+    Two passes. The structural screen rejects channels on shape alone — selling
+    access, forwarding, pre-announcing, firehosing — before a single price is
+    fetched. Survivors get scored against one-minute candles around their
+    historical calls.
+
+    One-minute resolution cannot tell you what a fast bot would have been
+    filled at on a 30-second spike. It answers the two questions that do not
+    need sub-minute precision, and that kill most channels anyway: how far the
+    price had already run before the call, and whether the call is worth
+    anything five to fifteen minutes later. Survivors of *this* still need live
+    tick recording before you trade them.
+    """
+    import asyncio
+
+    cfg = _load(args)
+    _require_telegram(cfg, args.config)
+    cfg.mode = "simulate"
+    cfg.risk.max_trades_per_run = 0              # observe only
+
+    # At one-minute resolution a 30s horizon is noise. Force something the data
+    # can actually support, and say so rather than quietly scoring garbage.
+    if cfg.scoring.primary_horizon_s < 300:
+        print(f"▸ scoring horizon raised {cfg.scoring.primary_horizon_s}s -> 300s "
+              f"for triage: 1-minute candles cannot resolve anything shorter")
+        cfg.scoring.primary_horizon_s = 300
+    cfg.marketdata.return_horizons_s = [60, 300, 900, 1800]
+    cfg.scoring.min_signals_for_score = args.min_calls
+
+    async def _go() -> int:
+        import aiohttp
+        from telethon import TelegramClient
+
+        from .ingest.history import read_history, screen, summarise
+        from .marketdata.historical import HistoricalFeed
+        from .marketdata.kucoin import KucoinSymbols, fetch_klines
+        from .parsing.extractor import SignalExtractor
+
+        extractor = SignalExtractor(
+            ignore_symbols=cfg.parsing.ignore_symbols,
+            quote_assets=cfg.parsing.quote_assets,
+            accept_contracts=cfg.parsing.accept_contracts,
+            min_confidence=cfg.parsing.min_confidence,
+        )
+
+        client = TelegramClient(
+            cfg.telegram.session_name, cfg.telegram.api_id, cfg.telegram.api_hash
+        )
+        await client.start()
+
+        try:
+            targets = [(c.id, c.name) for c in cfg.telegram.channels
+                       if c.tier != "blocked"]
+            if not targets or args.all_joined:
+                from telethon.tl.types import Channel
+
+                targets = []
+                async for dialog in client.iter_dialogs():
+                    entity = dialog.entity
+                    if isinstance(entity, Channel):
+                        targets.append((int(f"-100{entity.id}"), entity.title or ""))
+                print(f"▸ no channels configured; using {len(targets)} joined channel(s)")
+
+            if not targets:
+                print("error: no channels to triage. Join some, or list them in "
+                      f"telegram.channels in {args.config}.", file=sys.stderr)
+                return 1
+
+            print(f"▸ reading {args.days}d of history from {len(targets)} channel(s)\n")
+            histories = []
+            for chat_id, name in targets:
+                try:
+                    h = await read_history(
+                        client, chat_id, name=name, days=args.days, limit=args.limit
+                    )
+                except Exception as exc:                 # noqa: BLE001
+                    print(f"  ✗ {name or chat_id}: {type(exc).__name__}: {exc}")
+                    continue
+                histories.append(h)
+                print(f"  · {h.name[:34]:<34} {len(h.messages):>5} msgs "
+                      f"over {h.span_days:>5.1f}d")
+        finally:
+            await client.disconnect()
+
+        screens = [screen(h, extractor, min_signals_for_score=args.min_calls)
+                   for h in histories]
+        screens.sort(key=lambda s: (s.rejected, -s.calls_per_day))
+
+        print(f"\n{'channel':<30} {'msgs':>6} {'calls':>6} {'/day':>6} "
+              f"{'fwd':>5} {'paid':>5} {'pre':>5}  verdict")
+        print("─" * 104)
+        for sc in screens:
+            print(f"{sc.name[:30]:<30} {sc.messages:>6} {sc.calls:>6} "
+                  f"{sc.calls_per_day:>6.1f} {100*sc.forward_ratio:>4.0f}% "
+                  f"{100*sc.paid_pitch_ratio:>4.0f}% {100*sc.preannounce_ratio:>4.0f}%  "
+                  f"{sc.verdict[:42]}")
+
+        flagged = [sc for sc in screens if sc.flags]
+        if flagged:
+            print("\nflags:")
+            for sc in flagged:
+                for f in sc.flags:
+                    print(f"  {sc.name[:28]:<28} {f}")
+
+        stats = summarise(screens)
+        print(f"\n▸ structural screen: {stats['rejected']}/{stats['channels']} rejected, "
+              f"{stats['kept']} worth pricing")
+
+        survivors = {sc.chat_id for sc in screens if not sc.rejected}
+        if not survivors:
+            print("\nNothing survived the structural screen. That is a result: none of "
+                  "these channels is worth weeks of recording.")
+            return 0
+
+        # ---- price the survivors ---------------------------------------
+        messages = []
+        for h in histories:
+            if h.chat_id in survivors:
+                messages.extend(h.messages)
+        messages.sort(key=lambda m: m.received_wall_ms)
+
+        pairs = []
+        for m in messages:
+            sig = extractor.extract(m)
+            if sig is not None and sig.symbol:
+                pairs.append((sig.symbol, m.posted_wall_ms or m.received_wall_ms))
+
+        prices_path = Path(args.prices_out)
+        async with aiohttp.ClientSession() as session:
+            symbols = await KucoinSymbols.load(session, cfg.marketdata.rest_base)
+            listed = {s for s, _ in pairs if symbols.resolve(s)}
+            unlisted = {s for s, _ in pairs} - listed
+            print(f"\n▸ {len(pairs)} calls across {len(listed)} symbol(s) listed on "
+                  f"{cfg.marketdata.venue}")
+            if unlisted:
+                shown = ", ".join(sorted(unlisted)[:10])
+                print(f"  {len(unlisted)} symbol(s) not listed here — dropped, not "
+                      f"counted as flat: {shown}"
+                      + (" …" if len(unlisted) > 10 else ""))
+            if not listed:
+                print("\nNone of these calls name a symbol tradable on this venue.",
+                      file=sys.stderr)
+                return 1
+
+            print("▸ fetching 1m candles (this paces itself to stay inside the "
+                  "rate limit)…")
+            done = [0]
+
+            def progress(venue: str, rows: int) -> None:
+                done[0] += 1
+                if done[0] % 10 == 0 or rows == 0:
+                    mark = "✗" if rows == 0 else "·"
+                    print(f"  {mark} {done[0]}/{len(listed)} {venue} {rows} bars")
+
+            await fetch_klines(
+                session, pairs, prices_path,
+                rest_base=cfg.marketdata.rest_base,
+                window_before_s=args.before, window_after_s=args.after,
+                symbols=symbols, progress=progress,
+            )
+
+        feed = HistoricalFeed.from_file(prices_path)
+        covered, total, missing = feed.coverage([s for s, _ in pairs])
+        print(f"▸ priced {covered}/{total} symbols")
+
+        runner = SimulationRunner(cfg, messages, seed=0, feed=feed)
+        result = await runner.run()
+
+        if not result.channel_scores:
+            print(f"\nNo channel reached {args.min_calls} priced calls. Either the "
+                  f"window is too short, or these channels mostly name tokens this "
+                  f"venue does not list.", file=sys.stderr)
+            return 1
+
+        print(f"\n{'#':>2}  {'channel':<28} {'calls':>6} {'hit':>7} {'median':>9} "
+              f"{'pre-run':>8} {'orig':>6} {'best hold':>11} {'score':>7}")
+        print("─" * 96)
+        for i, c in enumerate(result.channel_scores, 1):
+            print(f"{i:>2}  {c.name[:28]:<28} {c.signals:>6} {100*c.hit_rate:>6.1f}% "
+                  f"{c.median_return_pct:>+8.2f}% {c.pre_pump_pct:>7.1f}% "
+                  f"{c.originator_score:>6.2f} {c.best_horizon_s:>8}s "
+                  f"{c.composite:>7.3f}")
+        print()
+        for c in result.channel_scores:
+            print(f"  {c.name}: {c.verdict}")
+
+        keep = [c for c in result.channel_scores if c.composite >= args.min_score]
+        print(f"\n▸ {len(keep)} channel(s) scored >= {args.min_score}")
+        if keep and args.write_config:
+            payload = {"telegram": {"channels": [
+                {"id": c.chat_id, "name": c.name, "tier": "trusted"} for c in keep
+            ]}}
+            Path(args.write_config).write_text(json.dumps(payload, indent=2),
+                                               encoding="utf-8")
+            print(f"▸ wrote them to {args.write_config}")
+
+        writer = ReportWriter(cfg.reporting.output_dir, cfg.reporting.formats)
+        paths = writer.write(result, None)
+        for fmt, path in paths.items():
+            print(f"  report ({fmt}): {path}")
+
+        print("\nNext: record the survivors live. One-minute candles cannot price a "
+              "30-second spike, so these scores rank channels — they do not tell you "
+              "what a fast bot would have been filled at.")
+        return 0
+
+    return asyncio.run(_go())
+
+
 def cmd_gate(args: argparse.Namespace) -> int:
     cfg = _load(args)
     status = PromotionGate(cfg.gate, config_fingerprint(cfg)).status()
@@ -617,6 +828,24 @@ def build_parser() -> argparse.ArgumentParser:
     fp.add_argument("--after", type=int, default=3600,
                     help="seconds after each call (default 3600)")
     fp.set_defaults(func=cmd_fetch_prices)
+
+    tr = sub.add_parser("triage",
+                        help="judge channels on their history, today — no weeks of recording")
+    tr.add_argument("--days", type=int, default=30, help="how far back to read")
+    tr.add_argument("--limit", type=int, default=3000,
+                    help="max messages per channel")
+    tr.add_argument("--all-joined", action="store_true",
+                    help="triage every joined channel, ignoring telegram.channels")
+    tr.add_argument("--min-calls", type=int, default=8,
+                    help="calls a channel needs before it gets a score")
+    tr.add_argument("--min-score", type=float, default=0.50)
+    tr.add_argument("--before", type=int, default=600,
+                    help="seconds of candles before each call")
+    tr.add_argument("--after", type=int, default=1800,
+                    help="seconds after each call")
+    tr.add_argument("--prices-out", default="data/recorded/triage_prices.jsonl")
+    tr.add_argument("--write-config", help="write surviving channels to this JSON")
+    tr.set_defaults(func=cmd_triage)
 
     g = sub.add_parser("gate", help="show promotion-gate status")
     g.set_defaults(func=cmd_gate)
