@@ -151,10 +151,22 @@ and whether the call is worth anything 5-15 minutes later.
 **If the API login will not work**, `--from-export` skips Telegram entirely.
 Login codes for freshly created applications are sometimes accepted by the
 server and then silently never delivered, which leaves nothing to debug.
-Telegram Desktop → Settings → Advanced → Export Telegram data, with
-*Machine-readable JSON* and the channels selected, produces everything triage
-needs and no credentials at all. Recording still needs a working login later,
-but the pass that decides whether any of this is worth doing does not.
+
+There are two macOS apps called Telegram and they export differently:
+
+| App | Where | Export |
+|---|---|---|
+| **Telegram Desktop** | desktop.telegram.org | Settings → Advanced → Export Telegram data — whole account at once |
+| **Telegram for macOS** | Mac App Store | No global export; right-click a chat → Export Chat History, one at a time |
+
+Either works. Choose format **Machine-readable JSON**, include the channels,
+and turn media off — media is gigabytes and triage reads only text. With the
+App Store app you end up with one folder per channel; point `--from-export` at
+the folder holding them all and they are found, merged and de-duplicated
+(per-chat exports taken on different days overlap).
+
+Recording still needs a working login later. The pass that decides whether any
+of this is worth doing does not.
 
 ### 4. `fetch-prices` — get the prices to judge against *(Binance only)*
 
@@ -373,7 +385,7 @@ tell you this strategy prints money. It does not.
 ## Tests
 
 ```bash
-pytest -q        # 212 tests
+pytest -q        # 218 tests
 ```
 
 Covering parser precision (including the false positives that would fire market

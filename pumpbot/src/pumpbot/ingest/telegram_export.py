@@ -89,39 +89,68 @@ def _timestamp_ms(message: Dict[str, Any]) -> Optional[float]:
         return None
 
 
-def iter_chats(path: str | Path) -> Iterator[Dict[str, Any]]:
-    """Yield chat objects from either a full export or a single-chat export."""
-    file = Path(path)
-    if file.is_dir():
-        candidate = file / "result.json"
-        if not candidate.exists():
-            raise ExportError(
-                f"{file} contains no result.json. Point at the export folder "
-                f"Telegram Desktop created, or at result.json itself."
-            )
-        file = candidate
+def find_export_files(path: str | Path) -> List[Path]:
+    """Locate every ``result.json`` under ``path``.
 
-    if not file.exists():
-        raise ExportError(f"export not found: {file}")
+    Three shapes have to work, because which one you get depends on which
+    Telegram app you happen to have:
 
+    * ``result.json`` itself.
+    * One export folder containing it — Telegram Desktop's whole-account
+      export.
+    * A folder of export folders. The macOS App Store app has no global
+      export, only per-chat, so exporting twenty channels leaves twenty
+      folders. Merging those by hand is busywork and easy to get wrong.
+    """
+    root = Path(path)
+    if root.is_file():
+        return [root]
+    if not root.is_dir():
+        raise ExportError(f"export not found: {root}")
+
+    direct = root / "result.json"
+    if direct.exists():
+        return [direct]
+
+    # Bounded depth: deep enough for a folder of export folders, shallow
+    # enough not to crawl an entire home directory by accident.
+    found = sorted({*root.glob("*/result.json"), *root.glob("*/*/result.json")})
+    if not found:
+        raise ExportError(
+            f"{root} contains no result.json, and neither do the folders "
+            f"inside it. Point at the export folder Telegram created, at the "
+            f"folder holding several of them, or at result.json itself."
+        )
+    return found
+
+
+def _chats_in(file: Path) -> Iterator[Dict[str, Any]]:
     try:
         with file.open("r", encoding="utf-8") as fh:
             data = json.load(fh)
     except json.JSONDecodeError as exc:
-        raise ExportError(f"{file} is not valid JSON: {exc}") from exc
+        raise ExportError(
+            f"{file} is not valid JSON: {exc}. Telegram exports HTML by "
+            f"default — re-export choosing format 'Machine-readable JSON'."
+        ) from exc
 
     chats = data.get("chats")
     if isinstance(chats, dict) and isinstance(chats.get("list"), list):
-        yield from chats["list"]                 # full export
+        yield from chats["list"]                 # whole-account export
     elif isinstance(data.get("messages"), list):
         yield data                               # single-chat export
     else:
         raise ExportError(
             f"{file} does not look like a Telegram export. Expected a 'chats' "
-            f"list or a 'messages' array. In Telegram Desktop choose "
-            f"Settings -> Advanced -> Export Telegram data, format "
+            f"list or a 'messages' array. Re-export choosing format "
             f"'Machine-readable JSON'."
         )
+
+
+def iter_chats(path: str | Path) -> Iterator[Dict[str, Any]]:
+    """Yield chat objects from one export, or from a folder of exports."""
+    for file in find_export_files(path):
+        yield from _chats_in(file)
 
 
 def read_export(
@@ -135,7 +164,8 @@ def read_export(
         datetime.now(timezone.utc) - timedelta(days=days)
     ).timestamp() * 1000.0
 
-    out: List[ChannelHistory] = []
+    by_id: Dict[int, ChannelHistory] = {}
+    spans: Dict[int, List[float]] = {}
     for chat in iter_chats(path):
         if channels_only and chat.get("type") not in (
             "public_channel", "private_channel", "channel"
@@ -146,11 +176,17 @@ def read_export(
         if chat_id is None:
             continue
 
-        history = ChannelHistory(
-            chat_id=chat_id, name=chat.get("name") or str(chat_id)
-        )
-        oldest: Optional[float] = None
-        newest: Optional[float] = None
+        # A channel can appear in more than one file — per-chat exports taken
+        # on different days overlap. Merge rather than emit it twice, or the
+        # scorer sees one channel as several and none reaches a sample.
+        history = by_id.get(chat_id)
+        if history is None:
+            history = ChannelHistory(
+                chat_id=chat_id, name=chat.get("name") or str(chat_id)
+            )
+            by_id[chat_id] = history
+            spans[chat_id] = []
+        seen_ids = {m.message_id for m in history.messages}
 
         for message in chat.get("messages", []):
             if message.get("type") != "message":
@@ -160,8 +196,11 @@ def read_export(
             if posted_ms is None or posted_ms < cutoff_ms:
                 continue
 
-            oldest = posted_ms if oldest is None else min(oldest, posted_ms)
-            newest = posted_ms if newest is None else max(newest, posted_ms)
+            message_id = int(message.get("id") or 0)
+            if message_id in seen_ids:
+                continue                         # already read from another file
+
+            spans[chat_id].append(posted_ms)
 
             if message.get("forwarded_from") is not None:
                 history.forwards += 1
@@ -172,9 +211,10 @@ def read_export(
             if not text:
                 continue
 
+            seen_ids.add(message_id)
             history.messages.append(RawMessage(
                 chat_id=chat_id,
-                message_id=int(message.get("id") or 0),
+                message_id=message_id,
                 text=text,
                 received_ns=now_ns(),
                 # An export has no arrival time, only the post time. Using it
@@ -187,9 +227,13 @@ def read_export(
                 source_session="export",
             ))
 
-        if oldest is not None and newest is not None:
-            history.span_days = max((newest - oldest) / 86_400_000.0, 0.0)
+    out: List[ChannelHistory] = []
+    for chat_id, history in by_id.items():
+        stamps = spans.get(chat_id) or []
+        if stamps:
+            history.span_days = max((max(stamps) - min(stamps)) / 86_400_000.0, 0.0)
         if history.messages:
+            history.messages.sort(key=lambda m: m.posted_wall_ms or 0.0)
             out.append(history)
 
     return out

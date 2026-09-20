@@ -224,3 +224,70 @@ def test_export_histories_screen_correctly(tmp_path, now):
     s = screen(h, SignalExtractor(quote_assets=["USDT"], min_confidence=0.55))
     assert s.forward_ratio == 1.0
     assert s.rejected
+
+
+# --- folders of per-chat exports -------------------------------------------
+def single_chat_export(folder, name, chat_id, messages):
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "result.json").write_text(json.dumps({
+        "name": name, "type": "public_channel", "id": chat_id,
+        "messages": messages,
+    }), encoding="utf-8")
+
+
+def test_folder_of_per_chat_exports_is_read(tmp_path, now):
+    """The macOS App Store app has no global export, only per-chat, so twenty
+    channels means twenty folders."""
+    single_chat_export(tmp_path / "ChatExport_alpha", "alpha", 111,
+                       [msg(1, now - 3600, "BUY $AAA NOW")])
+    single_chat_export(tmp_path / "ChatExport_beta", "beta", 222,
+                       [msg(1, now - 3600, "BUY $BBB NOW")])
+    names = sorted(h.name for h in read_export(tmp_path, days=7))
+    assert names == ["alpha", "beta"]
+
+
+def test_nested_export_folders_are_found(tmp_path, now):
+    single_chat_export(tmp_path / "Telegram" / "ChatExport_alpha", "alpha", 111,
+                       [msg(1, now - 3600, "BUY $AAA NOW")])
+    assert [h.name for h in read_export(tmp_path, days=7)] == ["alpha"]
+
+
+def test_the_same_channel_across_exports_is_merged(tmp_path, now):
+    """Per-chat exports taken on different days overlap. Emitting the channel
+    twice would split its sample so neither half reaches a score."""
+    single_chat_export(tmp_path / "export_monday", "alpha", 111, [
+        msg(1, now - 5 * 86400, "BUY $AAA NOW"),
+        msg(2, now - 4 * 86400, "BUY $BBB NOW"),
+    ])
+    single_chat_export(tmp_path / "export_friday", "alpha", 111, [
+        msg(2, now - 4 * 86400, "BUY $BBB NOW"),        # overlap
+        msg(3, now - 1 * 86400, "BUY $CCC NOW"),
+    ])
+    histories = read_export(tmp_path, days=30)
+    assert len(histories) == 1
+    h = histories[0]
+    assert [m.message_id for m in h.messages] == [1, 2, 3]
+    assert h.span_days == pytest.approx(4.0, abs=0.1)
+
+
+def test_merged_messages_are_in_time_order(tmp_path, now):
+    single_chat_export(tmp_path / "b", "alpha", 111,
+                       [msg(9, now - 1 * 86400, "BUY $LATE NOW")])
+    single_chat_export(tmp_path / "a", "alpha", 111,
+                       [msg(1, now - 5 * 86400, "BUY $EARLY NOW")])
+    stamps = [m.posted_wall_ms for m in read_export(tmp_path, days=30)[0].messages]
+    assert stamps == sorted(stamps)
+
+
+def test_a_folder_with_no_exports_anywhere_is_explained(tmp_path):
+    (tmp_path / "random").mkdir()
+    with pytest.raises(ExportError, match="neither do the folders inside"):
+        read_export(tmp_path, days=7)
+
+
+def test_html_export_names_the_json_setting(tmp_path):
+    folder = tmp_path / "ChatExport"
+    folder.mkdir()
+    (folder / "result.json").write_text("<html></html>", encoding="utf-8")
+    with pytest.raises(ExportError, match="Machine-readable JSON"):
+        read_export(folder, days=7)
