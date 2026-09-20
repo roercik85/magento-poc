@@ -1,0 +1,13 @@
+Metadata-Version: 2.4
+Name: pumpbot
+Version: 0.1.0
+Summary: Telegram pump-channel signal research and trading harness
+Requires-Python: >=3.11
+Requires-Dist: PyYAML>=6.0
+Provides-Extra: live
+Requires-Dist: telethon>=1.36; extra == "live"
+Requires-Dist: aiohttp>=3.9; extra == "live"
+Requires-Dist: orjson>=3.10; extra == "live"
+Requires-Dist: uvloop>=0.19; sys_platform != "win32" and extra == "live"
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"

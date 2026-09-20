@@ -211,3 +211,44 @@ def test_shipped_templates_contain_no_credentials():
         cfg = load_config(root / name)
         assert cfg.telegram.api_id == 0, f"{name} ships a real api_id"
         assert cfg.telegram.api_hash == "", f"{name} ships a real api_hash"
+
+
+# --- first-run guard -------------------------------------------------------
+def test_missing_telegram_credentials_exits_cleanly(capsys, monkeypatch):
+    """The first wall a new user hits must not be a traceback."""
+    from pumpbot.cli import _require_telegram
+    from pumpbot.config import Config
+
+    cfg = Config()
+    with pytest.raises(SystemExit) as exc:
+        _require_telegram(cfg, "config.yaml")
+    assert exc.value.code == 2
+
+    err = capsys.readouterr().err
+    assert "my.telegram.org" in err
+    assert "PUMPBOT_TG_API_ID" in err
+    assert "PUMPBOT_TG_API_HASH" in err
+    assert "Traceback" not in err
+
+
+def test_guard_passes_once_credentials_are_present():
+    from pumpbot.cli import _require_telegram
+    from pumpbot.config import Config
+
+    cfg = Config()
+    cfg.telegram.api_id = 123
+    cfg.telegram.api_hash = "x" * 32
+    _require_telegram(cfg, "config.yaml")        # must not raise
+
+
+def test_guard_names_only_what_is_missing(capsys):
+    from pumpbot.cli import _require_telegram
+    from pumpbot.config import Config
+
+    cfg = Config()
+    cfg.telegram.api_id = 123
+    with pytest.raises(SystemExit):
+        _require_telegram(cfg, "config.yaml")
+    err = capsys.readouterr().err
+    assert "api_hash not set" in err
+    assert "api_id and" not in err

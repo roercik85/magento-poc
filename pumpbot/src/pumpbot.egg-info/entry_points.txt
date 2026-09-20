@@ -1,0 +1,2 @@
+[console_scripts]
+pumpbot = pumpbot.cli:main

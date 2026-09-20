@@ -1,0 +1,12 @@
+PyYAML>=6.0
+
+[dev]
+pytest>=8.0
+
+[live]
+telethon>=1.36
+aiohttp>=3.9
+orjson>=3.10
+
+[live:sys_platform != "win32"]
+uvloop>=0.19

@@ -91,6 +91,7 @@ def cmd_simulate(args: argparse.Namespace) -> int:
 
 def cmd_record(args: argparse.Namespace) -> int:
     cfg = _load(args)
+    _require_telegram(cfg, args.config)
     cfg.mode = "record"
     loop_impl = _install_uvloop()
 
@@ -141,6 +142,7 @@ def cmd_record(args: argparse.Namespace) -> int:
 
 def cmd_live(args: argparse.Namespace) -> int:
     cfg = _load(args)
+    _require_telegram(cfg, args.config)
     cfg.mode = "live"
 
     gate = PromotionGate(cfg.gate, config_fingerprint(cfg))
@@ -255,6 +257,7 @@ def cmd_score(args: argparse.Namespace) -> int:
 
 def cmd_discover(args: argparse.Namespace) -> int:
     cfg = _load(args)
+    _require_telegram(cfg, args.config)
 
     async def _go() -> int:
         from telethon import TelegramClient
@@ -315,6 +318,40 @@ def cmd_gate(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+def _require_telegram(cfg: Config, config_path: str) -> None:
+    """Fail clean, before any connection, when credentials are missing.
+
+    This is the first wall every new user hits, and a traceback out of the
+    event loop is a bad answer to "I have not set this up yet".
+    """
+    tg = cfg.telegram
+    if tg.api_id and tg.api_hash:
+        return
+    missing = []
+    if not tg.api_id:
+        missing.append("api_id")
+    if not tg.api_hash:
+        missing.append("api_hash")
+    print(
+        f"error: Telegram {' and '.join(missing)} not set.\n"
+        f"\n"
+        f"  1. Go to https://my.telegram.org -> API development tools\n"
+        f"     and create an application (title/short name: anything, e.g.\n"
+        f"     \"pumpbot\"; leave URL empty; platform: Other).\n"
+        f"     If it shows ERROR, reload the page — the app is usually\n"
+        f"     created anyway and the values appear at the top.\n"
+        f"\n"
+        f"  2. Export them, so no file has to hold the secret:\n"
+        f"       export {tg.api_id_env}=<the number>\n"
+        f"       export {tg.api_hash_env}=<the 32-char hash>\n"
+        f"\n"
+        f"  (Or set telegram.api_id / telegram.api_hash in {config_path},\n"
+        f"   which is gitignored — but the environment is safer.)",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
+
 def _load_channel_scores(report_json: str) -> dict:
     """Read ``{chat_id: composite}`` out of a previous run's report."""
     path = Path(report_json)
