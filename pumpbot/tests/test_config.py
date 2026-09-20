@@ -345,3 +345,40 @@ def test_preparing_an_existing_session_directory_is_idempotent(tmp_path, monkeyp
     prepare_session_path("state/pumpbot")
     prepare_session_path("state/pumpbot")
     assert (tmp_path / "state").is_dir()
+
+
+# --- login diagnostics -----------------------------------------------------
+def test_every_telethon_code_type_has_a_plain_explanation():
+    """"I never got a code" is almost always "it went somewhere I was not
+    looking", so every delivery type Telegram can pick must be explained.
+
+    Skipped where telethon is absent: it is an optional dependency, and
+    simulation must keep working without it.
+    """
+    auth = pytest.importorskip("telethon.tl.types").auth
+
+    from pumpbot.cli import _CODE_DESTINATIONS
+
+    telethon_types = {
+        n for n in dir(auth)
+        if n.startswith("SentCodeType") and n != "SentCodeTypeSetUpEmailRequired"
+    }
+    missing = telethon_types - set(_CODE_DESTINATIONS)
+    assert not missing, f"no explanation for: {sorted(missing)}"
+
+
+def test_app_delivery_says_it_is_not_an_sms():
+    from pumpbot.cli import _CODE_DESTINATIONS
+
+    text = _CODE_DESTINATIONS["SentCodeTypeApp"]
+    assert "NOT an SMS" in text
+    assert "Telegram" in text
+
+
+def test_word_and_phrase_codes_are_called_out():
+    """Newer Telegram sends a word or a phrase instead of digits; somebody
+    scanning for a number will not recognise it."""
+    from pumpbot.cli import _CODE_DESTINATIONS
+
+    assert "WORD" in _CODE_DESTINATIONS["SentCodeTypeSmsWord"]
+    assert "PHRASE" in _CODE_DESTINATIONS["SentCodeTypeSmsPhrase"]

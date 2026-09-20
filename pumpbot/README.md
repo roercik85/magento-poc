@@ -352,7 +352,7 @@ tell you this strategy prints money. It does not.
 ## Tests
 
 ```bash
-pytest -q        # 179 tests
+pytest -q        # 185 tests
 ```
 
 Covering parser precision (including the false positives that would fire market

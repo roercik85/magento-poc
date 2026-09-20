@@ -301,6 +301,149 @@ def cmd_discover(args: argparse.Namespace) -> int:
     return asyncio.run(_go())
 
 
+# Telegram picks how it delivers a login code and does not make the choice
+# obvious. "I never got a code" is almost always "the code went somewhere I was
+# not looking", so name the destination in plain language.
+_CODE_DESTINATIONS = {
+    "SentCodeTypeApp": (
+        "the Telegram APP itself — open Telegram on a device where you are "
+        "already logged in and read the chat named \"Telegram\" (the official "
+        "one with the blue check). It is NOT an SMS."
+    ),
+    "SentCodeTypeSms": "an SMS to this number.",
+    "SentCodeTypeCall": "a phone CALL that reads the digits out.",
+    "SentCodeTypeMissedCall": (
+        "a MISSED CALL — the code is the last digits of the calling number."
+    ),
+    "SentCodeTypeFlashCall": "a flash call — the code is in the calling number.",
+    "SentCodeTypeFragmentSms": "Fragment (fragment.com), not a normal SMS.",
+    "SentCodeTypeFirebaseSms": "an SMS via Firebase.",
+    "SentCodeTypeEmailCode": "EMAIL, to the address on the account.",
+    "SentCodeTypeSmsWord": (
+        "an SMS containing a single WORD, not digits. Enter the word."
+    ),
+    "SentCodeTypeSmsPhrase": (
+        "an SMS containing a PHRASE of several words, not digits. Enter the phrase."
+    ),
+}
+
+
+def cmd_login(args: argparse.Namespace) -> int:
+    """Log in to Telegram and nothing else.
+
+    Separated from the commands that use the session because a failed login
+    inside `triage` looks like a triage problem. This reports what Telegram
+    actually said at each step — above all *where* it claims the code went,
+    which is the one fact that resolves almost every "no code arrived".
+    """
+    import asyncio
+
+    cfg = _load(args)
+    _require_telegram(cfg, args.config)
+
+    async def _go() -> int:
+        from telethon import TelegramClient
+        from telethon.errors import (
+            ApiIdInvalidError,
+            FloodWaitError,
+            PhoneCodeExpiredError,
+            PhoneCodeInvalidError,
+            PhoneNumberBannedError,
+            PhoneNumberInvalidError,
+            SessionPasswordNeededError,
+        )
+
+        from .ingest.telegram import prepare_session_path
+
+        session = prepare_session_path(cfg.telegram.session_name)
+        print(f"▸ api_id {cfg.telegram.api_id}, session {session}.session")
+
+        client = TelegramClient(session, cfg.telegram.api_id, cfg.telegram.api_hash)
+        try:
+            await client.connect()
+        except Exception as exc:                     # noqa: BLE001
+            print(f"⛔ could not reach Telegram: {type(exc).__name__}: {exc}",
+                  file=sys.stderr)
+            return 1
+        print("▸ connected")
+
+        try:
+            if await client.is_user_authorized():
+                me = await client.get_me()
+                print(f"✅ already logged in as {me.first_name or ''} "
+                      f"(@{me.username or 'no username'}, id {me.id})")
+                print("   Delete the session file to log in as someone else.")
+                return 0
+
+            phone = args.phone or input("phone number (international, e.g. +48...): ").strip()
+            if not phone.startswith("+"):
+                print(f"▸ adding the missing + -> +{phone}")
+                phone = "+" + phone
+
+            try:
+                sent = await client.send_code_request(phone, force_sms=args.force_sms)
+            except PhoneNumberInvalidError:
+                print(f"⛔ Telegram rejected {phone} as a phone number.", file=sys.stderr)
+                return 1
+            except PhoneNumberBannedError:
+                print(f"⛔ {phone} is banned from Telegram.", file=sys.stderr)
+                return 1
+            except ApiIdInvalidError:
+                print("⛔ api_id/api_hash rejected. They must be from the SAME "
+                      "application at my.telegram.org, copied without stray spaces.",
+                      file=sys.stderr)
+                return 1
+            except FloodWaitError as exc:
+                mins = exc.seconds / 60
+                print(f"⛔ rate limited: Telegram wants {exc.seconds}s "
+                      f"(~{mins:.0f} min) before the next attempt.\n"
+                      f"   Repeated tries make this longer, so wait it out.",
+                      file=sys.stderr)
+                return 1
+
+            kind = type(sent.type).__name__
+            where = _CODE_DESTINATIONS.get(kind, f"delivery type {kind}")
+            print(f"\n▸ Telegram says the code was sent to {where}")
+            if getattr(sent, "next_type", None) is not None:
+                nxt = type(sent.next_type).__name__
+                print(f"  If it does not arrive, a resend would use: {nxt}"
+                      + ("  (run again with --force-sms)"
+                         if "Sms" in nxt and not args.force_sms else ""))
+            if getattr(sent, "timeout", None):
+                print(f"  Valid for about {sent.timeout}s.")
+            print("\n  Type the code here — do not paste it into any chat. Telegram "
+                  "invalidates\n  codes it sees forwarded in messages.\n")
+
+            code = (args.code or input("code: ")).strip().replace(" ", "")
+            try:
+                await client.sign_in(phone, code, phone_code_hash=sent.phone_code_hash)
+            except PhoneCodeInvalidError:
+                print("⛔ wrong code.", file=sys.stderr)
+                return 1
+            except PhoneCodeExpiredError:
+                print("⛔ that code expired. Run this again for a fresh one.",
+                      file=sys.stderr)
+                return 1
+            except SessionPasswordNeededError:
+                import getpass
+
+                print("▸ two-factor authentication is on.")
+                await client.sign_in(password=getpass.getpass("2FA password: "))
+
+            me = await client.get_me()
+            print(f"\n✅ logged in as {me.first_name or ''} "
+                  f"(@{me.username or 'no username'}, id {me.id})")
+            print(f"   Session saved to {session}.session — treat that file as a "
+                  f"credential; anyone holding it is logged in as you.")
+            print("\n   Next: join some channels in Telegram, then run "
+                  "`pumpbot triage --all-joined`.")
+            return 0
+        finally:
+            await client.disconnect()
+
+    return asyncio.run(_go())
+
+
 def cmd_triage(args: argparse.Namespace) -> int:
     """Judge channels on their past, today, instead of recording for weeks.
 
@@ -846,6 +989,14 @@ def build_parser() -> argparse.ArgumentParser:
     fp.add_argument("--after", type=int, default=3600,
                     help="seconds after each call (default 3600)")
     fp.set_defaults(func=cmd_fetch_prices)
+
+    lg = sub.add_parser("login",
+                        help="log in to Telegram and report exactly what happened")
+    lg.add_argument("--phone", help="international format, e.g. +48123456789")
+    lg.add_argument("--code", help="skip the prompt (the code, not your password)")
+    lg.add_argument("--force-sms", action="store_true",
+                    help="ask for a real SMS instead of an in-app code")
+    lg.set_defaults(func=cmd_login)
 
     tr = sub.add_parser("triage",
                         help="judge channels on their history, today — no weeks of recording")
