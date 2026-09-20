@@ -16,7 +16,7 @@ import os
 import signal
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .config import Config, ConfigError, load_config
 from .engine import RunResult
@@ -766,6 +766,10 @@ def cmd_inspect(args: argparse.Namespace) -> int:
             print(f"{h.name}  —  {len(h.messages)} messages over {h.span_days:.1f}d")
             print("=" * 100)
 
+            if args.summary:
+                _print_parse_summary(h, extractor, listed, args.limit)
+                continue
+
             hits = misses = unlisted = 0
             shown = 0
             for m in h.messages:
@@ -804,6 +808,52 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         return 0
 
     return asyncio.run(_go())
+
+
+def _print_parse_summary(history, extractor, listed, limit: int) -> None:  # noqa: ANN001
+    """Aggregate a channel's parses by symbol and by pattern.
+
+    A channel producing seventy apparent calls needs the distribution, not
+    seventy lines: if sixty of them are one prose word arriving through the
+    imperative pattern, that is visible instantly here and invisible in a
+    message-by-message dump.
+    """
+    from collections import Counter
+
+    by_symbol: Counter = Counter()
+    by_pattern: Counter = Counter()
+    examples: Dict[str, str] = {}
+    tradable = 0
+
+    for m in history.messages:
+        sig = extractor.extract(m)
+        if sig is None or not sig.symbol:
+            continue
+        by_symbol[sig.symbol] += 1
+        by_pattern[sig.matched_by] += 1
+        examples.setdefault(sig.symbol, " ".join(m.text.split())[:60])
+        if listed is None or listed.resolve(sig.symbol) is not None:
+            tradable += 1
+
+    if not by_symbol:
+        print("  no calls parsed at all\n")
+        return
+
+    print(f"\n  {'symbol':<16} {'n':>4}  {'venue':<9} example")
+    print("  " + "-" * 92)
+    for symbol, count in by_symbol.most_common(limit):
+        ok = listed is None or listed.resolve(symbol) is not None
+        mark = "listed" if ok else "NOT listed"
+        print(f"  {symbol:<16} {count:>4}  {mark:<9} {examples[symbol]}")
+    if len(by_symbol) > limit:
+        print(f"  … {len(by_symbol) - limit} more symbol(s)")
+
+    print("\n  by pattern: " + ", ".join(
+        f"{name}={n}" for name, n in by_pattern.most_common()
+    ))
+    total = sum(by_symbol.values())
+    print(f"  {total} parse(s) over {len(by_symbol)} distinct symbol(s); "
+          f"{tradable} tradable here\n")
 
 
 def cmd_gate(args: argparse.Namespace) -> int:
@@ -1219,6 +1269,9 @@ def build_parser() -> argparse.ArgumentParser:
     ins.add_argument("--days", type=int, default=30)
     ins.add_argument("--limit", type=int, default=60,
                      help="max lines printed per channel")
+    ins.add_argument("--summary", action="store_true",
+                     help="aggregate by symbol and pattern instead of printing "
+                          "every message — the compact view for a busy channel")
     ins.add_argument("--show-misses", action="store_true",
                      help="also print messages that produced no call")
     ins.add_argument("--min-confidence", type=float,

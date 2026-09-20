@@ -184,6 +184,11 @@ the pattern that fired, the confidence, and whether the venue lists it.
 `--show-misses` prints what produced nothing, which is where a real call the
 parser dropped would show up.
 
+`--summary` aggregates by symbol and pattern instead of printing every
+message — the view you want when a channel produces seventy apparent calls and
+you need to know whether sixty of them are one prose word arriving through the
+same pattern.
+
 `--min-confidence` overrides the threshold for one run, so you can see what a
 looser setting would admit before changing anything.
 
@@ -404,7 +409,7 @@ tell you this strategy prints money. It does not.
 ## Tests
 
 ```bash
-pytest -q        # 252 tests
+pytest -q        # 256 tests
 ```
 
 Covering parser precision (including the false positives that would fire market

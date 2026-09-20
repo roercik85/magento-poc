@@ -366,6 +366,7 @@ def run_inspect(tmp_path, capsys, **kw):
     args = argparse.Namespace(
         config=None, from_export=str(tmp_path), channel=None, days=30,
         limit=100, show_misses=False, min_confidence=None, no_venue_check=True,
+        summary=False,
     )
     for k, v in kw.items():
         setattr(args, k, v)
@@ -467,3 +468,53 @@ def test_per_chat_and_account_exports_side_by_side(tmp_path, now):
     assert len(ids) == len(set(ids)), "overlapping messages were duplicated"
     assert 90 in ids, "messages only in the account export were lost"
     assert len(ids) == 6
+
+
+def test_inspect_summary_aggregates_by_symbol_and_pattern(tmp_path, capsys, now):
+    """A channel producing seventy apparent calls needs the distribution, not
+    seventy lines: one prose word repeating sixty times is visible here and
+    invisible in a message-by-message dump."""
+    write_export(tmp_path, [
+        chat("alpha", 111, [
+            *[msg(i, now - 3600 - i, "BUY $PEPE NOW") for i in range(5)],
+            *[msg(100 + i, now - 3600 - i, "BUY $BONK NOW") for i in range(2)],
+        ]),
+    ])
+    _, out = run_inspect(tmp_path, capsys, summary=True)
+    assert "PEPEUSDT" in out
+    assert "BONKUSDT" in out
+    assert "by pattern:" in out
+    assert "7 parse(s) over 2 distinct symbol(s)" in out
+
+
+def test_inspect_summary_marks_unlisted_symbols(tmp_path, capsys, now):
+    write_export(tmp_path, [
+        chat("alpha", 111, [msg(1, now - 3600, "BUY $PEPE NOW")]),
+    ])
+
+    class OnlyBonk:
+        @staticmethod
+        def resolve(symbol):
+            return "BONK-USDT" if symbol == "BONKUSDT" else None
+
+    import argparse
+
+    from pumpbot.cli import _print_parse_summary
+    from pumpbot.ingest.telegram_export import read_export as _read
+    from pumpbot.parsing.extractor import SignalExtractor
+
+    history = _read(tmp_path, days=30)[0]
+    _print_parse_summary(
+        history,
+        SignalExtractor(quote_assets=["USDT"], min_confidence=0.55),
+        OnlyBonk(), 20,
+    )
+    assert "NOT listed" in capsys.readouterr().out
+
+
+def test_inspect_summary_on_a_channel_with_no_calls(tmp_path, capsys, now):
+    write_export(tmp_path, [
+        chat("alpha", 111, [msg(1, now - 3600, "gm everyone")]),
+    ])
+    _, out = run_inspect(tmp_path, capsys, summary=True)
+    assert "no calls parsed at all" in out
