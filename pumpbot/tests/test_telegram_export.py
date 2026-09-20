@@ -497,8 +497,6 @@ def test_inspect_summary_marks_unlisted_symbols(tmp_path, capsys, now):
         def resolve(symbol):
             return "BONK-USDT" if symbol == "BONKUSDT" else None
 
-    import argparse
-
     from pumpbot.cli import _print_parse_summary
     from pumpbot.ingest.telegram_export import read_export as _read
     from pumpbot.parsing.extractor import SignalExtractor

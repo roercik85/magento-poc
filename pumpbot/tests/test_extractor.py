@@ -200,3 +200,46 @@ def test_default_ignore_list_is_not_shared_between_configs():
     a, b = Config(), Config()
     a.parsing.ignore_symbols.clear()
     assert b.parsing.ignore_symbols
+
+
+# ---------------------------------------------------------------------------
+# More regressions from real channels.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        # "#" marks topics at least as often as tickers, and case separates
+        # them: a ticker hashtag is written in caps.
+        ("With #base hype heating up I've added another play", None),
+        ("#Gaming narrative on RH is starting to heat up", None),
+        ("#defi season incoming", None),
+        ("#W0X just at $78k mc", "W0XUSDT"),
+        ("#PEPE breaking out", "PEPEUSDT"),
+        # A hyphen strands a fragment that is not itself a stopword.
+        ("$ETH 💰 LONG SET-UP 📈", None),
+        ("clean BREAK-OUT here", None),
+        ("nice PULL-BACK to support", None),
+        # "$" is the ticker convention, so any case is a call.
+        ("Aped small $rwacash here", "RWACASHUSDT"),
+        ("Just aped $HEDGE now", "HEDGEUSDT"),
+    ],
+)
+def test_topic_hashtags_and_split_words(ex, text, expected):
+    sig = ex.extract(msg(text))
+    assert (sig.symbol if sig else None) == expected
+
+
+def test_hashtag_pattern_is_reported_separately():
+    """Worth distinguishing from a cashtag: hashtags are the lower-precision
+    source, and the report shows which pattern produced each call."""
+    ex = SignalExtractor(quote_assets=["USDT"], min_confidence=0.0)
+    sig = ex.extract(msg("#WIFHAT breaking out"))
+    assert sig is not None
+    assert sig.matched_by == "hashtag"
+    assert sig.confidence < 0.72       # below a cashtag's
+
+
+def test_lowercase_hashtag_does_not_leak_through_uppercasing(ex):
+    """The text is upper-cased for most patterns, which would turn #base into
+    #BASE and admit it. The hashtag pattern has to read the original."""
+    assert ex.extract(msg("#base is heating up now 🚀")) is None

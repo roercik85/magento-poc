@@ -22,8 +22,15 @@ from ..models import RawMessage, Signal, SignalKind
 # ---------------------------------------------------------------------------
 # Patterns
 # ---------------------------------------------------------------------------
-# Cashtag / hashtag: "$PEPE", "#PEPE". Highest precision by a wide margin.
-_RE_CASHTAG = re.compile(r"[$#]([A-Z][A-Z0-9]{1,14})\b")
+# Cashtag: "$PEPE", "$pepe". The dollar sign is the ticker convention, so
+# any case is accepted.
+_RE_CASHTAG = re.compile(r"\$([A-Z][A-Z0-9]{1,14})\b")
+
+# Hashtag: "#PEPE". Run against the ORIGINAL text and case-sensitive, because
+# "#" marks topics at least as often as tickers — "#base hype heating up",
+# "#Gaming narrative" — and case is what separates the two in practice. A
+# ticker hashtag is written in caps.
+_RE_HASHTAG_CASED = re.compile(r"#([A-Z][A-Z0-9]{1,14})\b")
 
 # Explicit pair, run against the ORIGINAL text and case-sensitive, so a space
 # is allowed as the separator: "MYRO USDT" is a real format, but matching it on
@@ -91,6 +98,10 @@ _STOPWORDS: Set[str] = {
     "DONE", "SAFE", "SURE", "HOLD", "WAIT", "KEEP", "TAKE", "MAKE", "SEND",
     "BITCOIN", "ETHEREUM", "SOLANA", "RIPPLE", "CARDANO", "TETHER",
 }
+
+# Suffixes that a hyphen or space can strand, leaving a fragment that is not
+# itself a stopword: "SET-UP" -> "SET", "BREAK-OUT" -> "BREAK".
+_SPLIT_TAILS = ("UP", "OUT", "OFF", "IN", "DOWN", "BACK", "OVER")
 
 
 class SignalExtractor:
@@ -202,6 +213,10 @@ class SignalExtractor:
         if m and self._acceptable(m.group(1)):
             return m.group(1), "cashtag", 0.72
 
+        m = _RE_HASHTAG_CASED.search(text)
+        if m and self._acceptable(m.group(1)):
+            return m.group(1), "hashtag", 0.70
+
         return None, "", 0.0
 
     def _strip_quote(self, base: str) -> str:
@@ -224,6 +239,11 @@ class SignalExtractor:
 
     def _acceptable(self, token: str) -> bool:
         if token in _STOPWORDS or token in self._ignore:
+            return False
+        # A hyphen splits a stopword into a fragment that is not one: "LONG
+        # SET-UP" yielded SET, which is a real KuCoin-adjacent-looking ticker
+        # and reached the order path as a call.
+        if any(token + tail in _STOPWORDS for tail in _SPLIT_TAILS):
             return False
         # A bare two-letter token is almost always an abbreviation, not a
         # ticker, unless it arrived with a cashtag (handled by ordering above).
