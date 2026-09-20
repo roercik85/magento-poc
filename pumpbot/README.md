@@ -171,6 +171,22 @@ overlap. Media off matters: it is gigabytes, and triage reads only text.
 Recording still needs a working login later. The pass that decides whether any
 of this is worth doing does not.
 
+### 3b. `inspect` — see what the parser made of each message
+
+```bash
+pumpbot inspect --from-export PATH --channel "safe calls" --show-misses
+```
+
+When triage reports few calls or none, that has two very different causes — a
+quiet channel, or a parser that is too strict — and the summary line cannot
+tell them apart. This prints each message with the verdict on it: the symbol,
+the pattern that fired, the confidence, and whether the venue lists it.
+`--show-misses` prints what produced nothing, which is where a real call the
+parser dropped would show up.
+
+`--min-confidence` overrides the threshold for one run, so you can see what a
+looser setting would admit before changing anything.
+
 ### 4. `fetch-prices` — get the prices to judge against *(Binance only)*
 
 ```bash
@@ -388,7 +404,7 @@ tell you this strategy prints money. It does not.
 ## Tests
 
 ```bash
-pytest -q        # 222 tests
+pytest -q        # 252 tests
 ```
 
 Covering parser precision (including the false positives that would fire market

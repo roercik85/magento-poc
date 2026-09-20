@@ -355,3 +355,84 @@ def test_stats_count_files_and_chats(tmp_path, now):
     read_export(tmp_path, days=7, stats=stats)
     assert stats.files == 2
     assert stats.channels_seen == 2
+
+
+# --- inspect ---------------------------------------------------------------
+def run_inspect(tmp_path, capsys, **kw):
+    import argparse
+
+    from pumpbot.cli import cmd_inspect
+
+    args = argparse.Namespace(
+        config=None, from_export=str(tmp_path), channel=None, days=30,
+        limit=100, show_misses=False, min_confidence=None, no_venue_check=True,
+    )
+    for k, v in kw.items():
+        setattr(args, k, v)
+    code = cmd_inspect(args)
+    return code, capsys.readouterr().out
+
+
+def test_inspect_separates_calls_from_prose(tmp_path, capsys, now):
+    """"0 calls" has two causes — a quiet channel or an over-strict parser —
+    and the summary line cannot tell them apart."""
+    write_export(tmp_path, [
+        chat("alpha", 111, [
+            msg(1, now - 3600, "BUY $PEPE NOW 🚀"),
+            msg(2, now - 3500, "LONG SETUP incoming"),
+            msg(3, now - 3400, "gm everyone"),
+        ]),
+    ])
+    code, out = run_inspect(tmp_path, capsys)
+    assert code == 0
+    assert "PEPEUSDT" in out
+    assert "1 tradable call(s)" in out
+    assert "2 non-calls" in out
+
+
+def test_inspect_shows_the_matching_pattern(tmp_path, capsys, now):
+    write_export(tmp_path, [
+        chat("alpha", 111, [msg(1, now - 3600, "BUY $PEPE NOW 🚀")]),
+    ])
+    _, out = run_inspect(tmp_path, capsys)
+    assert "via imperative" in out or "via cashtag" in out
+    assert "confidence" in out
+
+
+def test_inspect_can_show_what_did_not_parse(tmp_path, capsys, now):
+    """Where a real call the parser missed would show up."""
+    write_export(tmp_path, [
+        chat("alpha", 111, [msg(1, now - 3600, "some unparseable prose")]),
+    ])
+    _, quiet = run_inspect(tmp_path, capsys)
+    assert "some unparseable prose" not in quiet
+    assert "--show-misses" in quiet
+
+    _, loud = run_inspect(tmp_path, capsys, show_misses=True)
+    assert "some unparseable prose" in loud
+
+
+def test_inspect_filters_by_channel(tmp_path, capsys, now):
+    write_export(tmp_path, [
+        chat("alpha calls", 111, [msg(1, now - 3600, "BUY $PEPE NOW")]),
+        chat("beta signals", 222, [msg(1, now - 3600, "BUY $BONK NOW")]),
+    ])
+    _, out = run_inspect(tmp_path, capsys, channel="beta")
+    assert "beta signals" in out
+    assert "alpha calls" not in out
+
+
+def test_inspect_confidence_override_changes_what_parses(tmp_path, capsys, now):
+    write_export(tmp_path, [
+        chat("alpha", 111, [msg(1, now - 3600, "Coin: PEPE")]),
+    ])
+    _, strict = run_inspect(tmp_path, capsys, min_confidence=0.99)
+    assert "0 tradable call(s)" in strict
+
+    _, loose = run_inspect(tmp_path, capsys, min_confidence=0.1)
+    assert "1 tradable call(s)" in loose
+
+
+def test_inspect_reports_an_unreadable_export(tmp_path, capsys):
+    code, _ = run_inspect(tmp_path, capsys, from_export=str(tmp_path / "nope"))
+    assert code == 1

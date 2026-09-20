@@ -704,6 +704,108 @@ def cmd_triage(args: argparse.Namespace) -> int:
     return asyncio.run(_go())
 
 
+def cmd_inspect(args: argparse.Namespace) -> int:
+    """Show what the parser makes of real messages, one by one.
+
+    "0 calls found" has two very different causes — a quiet channel, or a
+    parser that is too strict — and the summary line cannot tell them apart.
+    This prints the messages alongside the verdict on each, so the difference
+    is visible rather than guessed at.
+    """
+    import asyncio
+
+    cfg = _load(args)
+
+    async def _go() -> int:
+        from .ingest.telegram_export import (
+            ExportError,
+            ExportStats,
+            explain_empty,
+            read_export,
+        )
+        from .parsing.extractor import SignalExtractor
+
+        extractor = SignalExtractor(
+            ignore_symbols=cfg.parsing.ignore_symbols,
+            quote_assets=cfg.parsing.quote_assets,
+            accept_contracts=cfg.parsing.accept_contracts,
+            min_confidence=args.min_confidence
+            if args.min_confidence is not None else cfg.parsing.min_confidence,
+        )
+
+        stats = ExportStats()
+        try:
+            histories = read_export(args.from_export, days=args.days, stats=stats)
+        except ExportError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if not histories:
+            print(f"error: {explain_empty(stats, args.days)}", file=sys.stderr)
+            return 1
+
+        if args.channel:
+            needle = args.channel.lower()
+            histories = [h for h in histories if needle in h.name.lower()]
+            if not histories:
+                print(f"error: no channel matching {args.channel!r}", file=sys.stderr)
+                return 1
+
+        listed = None
+        if not args.no_venue_check:
+            import aiohttp
+
+            from .marketdata.kucoin import KucoinSymbols
+
+            async with aiohttp.ClientSession() as session:
+                symbols = await KucoinSymbols.load(session, cfg.marketdata.rest_base)
+            listed = symbols
+            print(f"▸ {len(symbols)} symbols listed on {cfg.marketdata.venue}\n")
+
+        for h in histories:
+            print("=" * 100)
+            print(f"{h.name}  —  {len(h.messages)} messages over {h.span_days:.1f}d")
+            print("=" * 100)
+
+            hits = misses = unlisted = 0
+            shown = 0
+            for m in h.messages:
+                sig = extractor.extract(m)
+                text = " ".join(m.text.split())[:88]
+
+                if sig is None or not sig.symbol:
+                    misses += 1
+                    if args.show_misses and shown < args.limit:
+                        shown += 1
+                        print(f"  ·  {'—':<14} {text}")
+                    continue
+
+                tradable = listed is None or listed.resolve(sig.symbol) is not None
+                if tradable:
+                    hits += 1
+                    mark = "✓"
+                else:
+                    unlisted += 1
+                    mark = "✗"
+                if shown < args.limit:
+                    shown += 1
+                    print(f"  {mark}  {sig.symbol:<14} {text}")
+                    print(f"     {'':<14} via {sig.matched_by}, confidence "
+                          f"{sig.confidence:.2f}"
+                          + ("" if tradable else "  ← NOT listed on this venue"))
+
+            total = len(h.messages)
+            print(f"\n  {hits} tradable call(s), {unlisted} call(s) on unlisted "
+                  f"symbols, {misses} non-calls, out of {total} messages")
+            if misses and not args.show_misses:
+                print("  Re-run with --show-misses to see what did not parse — "
+                      "that is where a real call the parser missed would show up.")
+            print()
+
+        return 0
+
+    return asyncio.run(_go())
+
+
 def cmd_gate(args: argparse.Namespace) -> int:
     cfg = _load(args)
     status = PromotionGate(cfg.gate, config_fingerprint(cfg)).status()
@@ -1108,6 +1210,22 @@ def build_parser() -> argparse.ArgumentParser:
     tr.add_argument("--prices-out", default="data/recorded/triage_prices.jsonl")
     tr.add_argument("--write-config", help="write surviving channels to this JSON")
     tr.set_defaults(func=cmd_triage)
+
+    ins = sub.add_parser("inspect",
+                         help="show what the parser makes of each message")
+    ins.add_argument("--from-export", required=True, metavar="PATH",
+                     help="Telegram Desktop JSON export (folder or result.json)")
+    ins.add_argument("--channel", help="only channels whose name contains this")
+    ins.add_argument("--days", type=int, default=30)
+    ins.add_argument("--limit", type=int, default=60,
+                     help="max lines printed per channel")
+    ins.add_argument("--show-misses", action="store_true",
+                     help="also print messages that produced no call")
+    ins.add_argument("--min-confidence", type=float,
+                     help="override parsing.min_confidence for this run")
+    ins.add_argument("--no-venue-check", action="store_true",
+                     help="skip checking symbols against the venue's listings")
+    ins.set_defaults(func=cmd_inspect)
 
     g = sub.add_parser("gate", help="show promotion-gate status")
     g.set_defaults(func=cmd_gate)
