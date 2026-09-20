@@ -4,7 +4,9 @@ __pycache__/
 venv/
 *.session
 *.session-journal
-config.yaml
+# Any config may hold an api_hash. Only the checked-in templates are tracked.
+config*.yaml
+!config*.example.yaml
 secrets.yaml
 .env
 runs/*/

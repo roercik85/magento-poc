@@ -43,8 +43,13 @@ class ChannelSpec:
 
 @dataclass
 class TelegramConfig:
+    # Prefer the environment over these fields. A config file holding an
+    # api_hash is one `git add -A` away from being published, and a leaked
+    # api_hash plus a session file is full access to the account.
     api_id: int = 0
     api_hash: str = ""
+    api_id_env: str = "PUMPBOT_TG_API_ID"
+    api_hash_env: str = "PUMPBOT_TG_API_HASH"
     session_name: str = "state/pumpbot"
     extra_sessions: List[TelegramSession] = field(default_factory=list)
     channels: List[ChannelSpec] = field(default_factory=list)
@@ -178,6 +183,33 @@ class Config:
     def is_live(self) -> bool:
         return self.mode == "live"
 
+    def apply_env_overrides(self) -> List[str]:
+        """Let the environment supply secrets so no file has to hold them.
+
+        Returns the names of the variables that were used, for the startup
+        banner — silently picking up credentials from somewhere the operator
+        cannot see is its own kind of bug.
+        """
+        used: List[str] = []
+        tg = self.telegram
+
+        raw_id = os.environ.get(tg.api_id_env, "")
+        if raw_id:
+            try:
+                tg.api_id = int(raw_id)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"{tg.api_id_env} must be an integer, got {raw_id!r}"
+                ) from exc
+            used.append(tg.api_id_env)
+
+        raw_hash = os.environ.get(tg.api_hash_env, "")
+        if raw_hash:
+            tg.api_hash = raw_hash
+            used.append(tg.api_hash_env)
+
+        return used
+
     def validate(self) -> None:
         if self.mode not in {"simulate", "record", "live"}:
             raise ConfigError(f"unknown mode: {self.mode!r}")
@@ -293,5 +325,6 @@ def load_config(path: str | Path) -> Config:
                           for item in block[key]]
 
     cfg = _build(Config, data)
+    cfg.apply_env_overrides()
     cfg.validate()
     return cfg

@@ -12,6 +12,17 @@ run_label: "baseline"
 # Get api_id / api_hash from https://my.telegram.org -> API development tools.
 # ---------------------------------------------------------------------------
 telegram:
+  # SECRETS: prefer the environment. Anything you type here lives in a file
+  # that is one `git add -A` away from being published, and a leaked api_hash
+  # together with a session file is full access to the account.
+  #
+  #   export PUMPBOT_TG_API_ID=12345678
+  #   export PUMPBOT_TG_API_HASH=your32charhash
+  #
+  # Both override the values below when set. Get them from
+  # https://my.telegram.org -> API development tools -> Create application
+  # (App title and Short name: anything, e.g. "pumpbot"; leave URL empty;
+  # Platform: Other). Only api_id and api_hash matter afterwards.
   api_id: 0
   api_hash: ""
   session_name: "state/pumpbot"

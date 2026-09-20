@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import signal
 import sys
 from pathlib import Path
@@ -442,10 +443,26 @@ def cmd_fetch_prices(args: argparse.Namespace) -> int:
 
 def _load(args: argparse.Namespace) -> Config:
     try:
-        return load_config(args.config)
+        cfg = load_config(args.config)
     except ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
+
+    # Say where credentials came from. Silently picking them up from somewhere
+    # the operator cannot see is its own kind of bug.
+    from_env = [
+        name for name, value in (
+            (cfg.telegram.api_id_env, os.environ.get(cfg.telegram.api_id_env)),
+            (cfg.telegram.api_hash_env, os.environ.get(cfg.telegram.api_hash_env)),
+        ) if value
+    ]
+    if from_env:
+        print(f"▸ telegram credentials from environment: {', '.join(from_env)}")
+    elif cfg.telegram.api_hash:
+        print(f"⚠ telegram api_hash is stored in {args.config}. Prefer "
+              f"{cfg.telegram.api_hash_env} in the environment — a config file "
+              f"holding a secret is one commit away from being published.")
+    return cfg
 
 
 async def _run_with_sigint(runner: LiveRunner) -> RunResult:

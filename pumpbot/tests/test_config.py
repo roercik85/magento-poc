@@ -156,7 +156,7 @@ def test_ten_usd_profile_is_valid_and_guarded():
     """The shipped live-test profile must load and keep exposure bounded."""
     from pathlib import Path
 
-    cfg = load_config(Path(__file__).resolve().parents[1] / "config.10usd.yaml")
+    cfg = load_config(Path(__file__).resolve().parents[1] / "config.10usd.example.yaml")
     assert cfg.execution.venue == "kucoin"
     assert cfg.risk.starting_equity == 10.0
     # Worst case exposure cannot exceed the account.
@@ -165,3 +165,49 @@ def test_ten_usd_profile_is_valid_and_guarded():
     # A config mistake cannot put more than the hard cap into one order.
     assert cfg.risk.position_notional_quote <= cfg.execution.live.max_notional_quote_hard_cap
     assert cfg.execution.live.max_notional_quote_hard_cap < cfg.risk.starting_equity
+
+
+# --- telegram credentials from the environment -----------------------------
+def test_env_supplies_telegram_credentials(tmp_path, monkeypatch):
+    """Secrets should never need to live in a file at all."""
+    monkeypatch.setenv("PUMPBOT_TG_API_ID", "987654")
+    monkeypatch.setenv("PUMPBOT_TG_API_HASH", "deadbeef" * 4)
+    cfg = load_config(write(tmp_path, {"mode": "simulate"}))
+    assert cfg.telegram.api_id == 987654
+    assert cfg.telegram.api_hash == "deadbeef" * 4
+
+
+def test_env_overrides_the_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("PUMPBOT_TG_API_ID", "111")
+    monkeypatch.setenv("PUMPBOT_TG_API_HASH", "fromenv")
+    cfg = load_config(write(tmp_path, {
+        "telegram": {"api_id": 222, "api_hash": "fromfile"},
+    }))
+    assert cfg.telegram.api_id == 111
+    assert cfg.telegram.api_hash == "fromenv"
+
+
+def test_file_is_used_when_env_is_absent(tmp_path, monkeypatch):
+    monkeypatch.delenv("PUMPBOT_TG_API_ID", raising=False)
+    monkeypatch.delenv("PUMPBOT_TG_API_HASH", raising=False)
+    cfg = load_config(write(tmp_path, {
+        "telegram": {"api_id": 222, "api_hash": "fromfile"},
+    }))
+    assert cfg.telegram.api_id == 222
+
+
+def test_non_numeric_api_id_env_is_a_clear_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("PUMPBOT_TG_API_ID", "not-a-number")
+    with pytest.raises(ConfigError, match="must be an integer"):
+        load_config(write(tmp_path, {"mode": "simulate"}))
+
+
+def test_shipped_templates_contain_no_credentials():
+    """Regression: the tracked templates must never carry a real secret."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    for name in ("config.example.yaml", "config.10usd.example.yaml"):
+        cfg = load_config(root / name)
+        assert cfg.telegram.api_id == 0, f"{name} ships a real api_id"
+        assert cfg.telegram.api_hash == "", f"{name} ships a real api_hash"
