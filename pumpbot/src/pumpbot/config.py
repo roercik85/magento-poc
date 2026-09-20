@@ -21,6 +21,9 @@ class ConfigError(ValueError):
     pass
 
 
+_SUPPORTED_VENUES = {"binance", "kucoin"}
+
+
 # --------------------------------------------------------------------------
 # sections
 # --------------------------------------------------------------------------
@@ -58,9 +61,11 @@ class ParsingConfig:
 
 @dataclass
 class MarketDataConfig:
-    venue: str = "binance"
-    rest_base: str = "https://api.binance.com"
-    ws_base: str = "wss://stream.binance.com:9443"
+    venue: str = "kucoin"
+    rest_base: str = "https://api.kucoin.com"
+    ws_base: str = ""                 # KuCoin hands out its ws endpoint per session
+    # How long to keep recording ticks after a symbol is called.
+    record_window_s: int = 900
     return_horizons_s: List[int] = field(
         default_factory=lambda: [5, 15, 30, 60, 300, 900, 3600]
     )
@@ -83,13 +88,14 @@ class SimulationConfig:
 class LiveConfig:
     api_key_env: str = "PUMPBOT_API_KEY"
     api_secret_env: str = "PUMPBOT_API_SECRET"
-    recv_window_ms: int = 5000
+    passphrase_env: str = "PUMPBOT_API_PASSPHRASE"   # KuCoin only
+    recv_window_ms: int = 5000                        # Binance only
     max_notional_quote_hard_cap: float = 100.0
 
 
 @dataclass
 class ExecutionConfig:
-    venue: str = "binance"
+    venue: str = "kucoin"
     simulation: SimulationConfig = field(default_factory=SimulationConfig)
     live: LiveConfig = field(default_factory=LiveConfig)
 
@@ -193,6 +199,13 @@ class Config:
         if self.risk.max_concurrent_positions < 1:
             raise ConfigError("risk.max_concurrent_positions must be >= 1")
 
+        for venue in (self.execution.venue, self.marketdata.venue):
+            if venue not in _SUPPORTED_VENUES:
+                raise ConfigError(
+                    f"unsupported venue {venue!r}; supported: "
+                    f"{', '.join(sorted(_SUPPORTED_VENUES))}"
+                )
+
         if self.is_live:
             cap = self.execution.live.max_notional_quote_hard_cap
             if self.risk.position_notional_quote > cap:
@@ -200,7 +213,12 @@ class Config:
                     f"live mode: position_notional_quote "
                     f"({self.risk.position_notional_quote}) exceeds hard cap ({cap})"
                 )
-            for env in (self.execution.live.api_key_env, self.execution.live.api_secret_env):
+            required = [self.execution.live.api_key_env, self.execution.live.api_secret_env]
+            if self.execution.venue == "kucoin":
+                # KuCoin signs with a third factor. Discovering this at the
+                # first order rather than at startup wastes a live session.
+                required.append(self.execution.live.passphrase_env)
+            for env in required:
                 if not os.environ.get(env):
                     raise ConfigError(f"live mode: environment variable {env} is not set")
 

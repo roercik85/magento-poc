@@ -81,15 +81,48 @@ def test_channels_are_built(tmp_path):
 
 # --- live guards ----------------------------------------------------------
 def test_live_requires_credentials(tmp_path, monkeypatch):
-    monkeypatch.delenv("PUMPBOT_API_KEY", raising=False)
-    monkeypatch.delenv("PUMPBOT_API_SECRET", raising=False)
+    for var in ("PUMPBOT_API_KEY", "PUMPBOT_API_SECRET", "PUMPBOT_API_PASSPHRASE"):
+        monkeypatch.delenv(var, raising=False)
     with pytest.raises(ConfigError, match="PUMPBOT_API_KEY"):
         load_config(write(tmp_path, {"mode": "live"}))
+
+
+def test_kucoin_live_requires_the_passphrase(tmp_path, monkeypatch):
+    """KuCoin signs with a third factor. Finding that out at the first order
+    rather than at startup wastes a live session."""
+    monkeypatch.setenv("PUMPBOT_API_KEY", "k")
+    monkeypatch.setenv("PUMPBOT_API_SECRET", "s")
+    monkeypatch.delenv("PUMPBOT_API_PASSPHRASE", raising=False)
+    with pytest.raises(ConfigError, match="PUMPBOT_API_PASSPHRASE"):
+        load_config(write(tmp_path, {
+            "mode": "live",
+            "execution": {"venue": "kucoin"},
+            "risk": {"position_notional_quote": 5.0},
+        }))
+
+
+def test_binance_live_does_not_require_a_passphrase(tmp_path, monkeypatch):
+    monkeypatch.setenv("PUMPBOT_API_KEY", "k")
+    monkeypatch.setenv("PUMPBOT_API_SECRET", "s")
+    monkeypatch.delenv("PUMPBOT_API_PASSPHRASE", raising=False)
+    cfg = load_config(write(tmp_path, {
+        "mode": "live",
+        "execution": {"venue": "binance"},
+        "marketdata": {"venue": "binance", "rest_base": "https://api.binance.com"},
+        "risk": {"position_notional_quote": 5.0},
+    }))
+    assert cfg.execution.venue == "binance"
+
+
+def test_unsupported_venue_is_rejected(tmp_path):
+    with pytest.raises(ConfigError, match="unsupported venue"):
+        load_config(write(tmp_path, {"execution": {"venue": "mtgox"}}))
 
 
 def test_live_enforces_the_notional_hard_cap(tmp_path, monkeypatch):
     monkeypatch.setenv("PUMPBOT_API_KEY", "k")
     monkeypatch.setenv("PUMPBOT_API_SECRET", "s")
+    monkeypatch.setenv("PUMPBOT_API_PASSPHRASE", "p")
     with pytest.raises(ConfigError, match="hard cap"):
         load_config(write(tmp_path, {
             "mode": "live",
@@ -101,6 +134,7 @@ def test_live_enforces_the_notional_hard_cap(tmp_path, monkeypatch):
 def test_live_passes_with_credentials_and_a_small_size(tmp_path, monkeypatch):
     monkeypatch.setenv("PUMPBOT_API_KEY", "k")
     monkeypatch.setenv("PUMPBOT_API_SECRET", "s")
+    monkeypatch.setenv("PUMPBOT_API_PASSPHRASE", "p")
     cfg = load_config(write(tmp_path, {
         "mode": "live", "risk": {"position_notional_quote": 20.0},
     }))
@@ -116,3 +150,18 @@ def test_example_config_is_valid():
     cfg = load_config(example)
     assert cfg.mode == "simulate"
     assert len(cfg.strategy.take_profit_ladder) == 3
+
+
+def test_ten_usd_profile_is_valid_and_guarded():
+    """The shipped live-test profile must load and keep exposure bounded."""
+    from pathlib import Path
+
+    cfg = load_config(Path(__file__).resolve().parents[1] / "config.10usd.yaml")
+    assert cfg.execution.venue == "kucoin"
+    assert cfg.risk.starting_equity == 10.0
+    # Worst case exposure cannot exceed the account.
+    exposure = cfg.risk.position_notional_quote * cfg.risk.max_concurrent_positions
+    assert exposure < cfg.risk.starting_equity
+    # A config mistake cannot put more than the hard cap into one order.
+    assert cfg.risk.position_notional_quote <= cfg.execution.live.max_notional_quote_hard_cap
+    assert cfg.execution.live.max_notional_quote_hard_cap < cfg.risk.starting_equity

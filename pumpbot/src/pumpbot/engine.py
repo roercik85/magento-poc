@@ -138,12 +138,18 @@ class Engine:
         logbook: Optional[Logbook] = None,
         channel_scores: Optional[Dict[int, float]] = None,
         run_id: Optional[str] = None,
+        on_signal=None,                         # noqa: ANN001 - Callable[[Signal], Any]
     ) -> None:
         self.cfg = cfg
         self.executor = executor
         self.feed = feed
         self.log = logbook
         self.run_id = run_id or uuid.uuid4().hex[:10]
+        # Fires the moment a signal parses, before any risk check. Used to get
+        # a market-data subscription up for the symbol while the risk and order
+        # path is still running — the price feed has to be live by the time the
+        # entry fills, or the exit logic has nothing to evaluate against.
+        self._on_signal = on_signal
 
         self.extractor = SignalExtractor(
             ignore_symbols=cfg.parsing.ignore_symbols,
@@ -183,6 +189,9 @@ class Engine:
             return None
 
         self.signals_parsed += 1
+        if self._on_signal is not None:
+            self._on_signal(signal)
+            trace.mark("subscribe")
         if self.log is not None:
             self.log.record(
                 "signal",

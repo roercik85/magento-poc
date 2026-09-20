@@ -1,0 +1,134 @@
+# ===========================================================================
+#  pumpbot — 10 USDT live test profile
+#
+#  Purpose: prove the plumbing works with real money at a size where being
+#  wrong is uninteresting. NOT to find out whether the strategy is profitable
+#  — see "What this can and cannot answer" at the bottom.
+#
+#  Usage:
+#    pumpbot -c config.10usd.yaml live --dry-run          # builds, sends nothing
+#    pumpbot -c config.10usd.yaml live --i-accept-live-trading-risk
+# ===========================================================================
+
+mode: simulate                 # the gate still has to unlock live
+run_label: "live-10usd"
+
+telegram:
+  api_id: 0                    # https://my.telegram.org -> API development tools
+  api_hash: ""
+  session_name: "state/pumpbot"
+  watch_edits: true
+  channels: []                 # fill from `pumpbot score --write-config`, tier: trusted
+
+parsing:
+  min_confidence: 0.70         # raised: at this size a false positive wastes a slot
+  ignore_symbols: [BTC, ETH, USDT, USDC, BNB, SOL, XRP, ADA, DOGE, TRX, DAI,
+                   BUSD, TUSD, WBTC, WETH, STETH, LINK, MATIC, DOT, AVAX]
+  quote_assets: [USDT]
+  accept_contracts: false      # contract calls are scored but not routed anywhere
+
+marketdata:
+  venue: kucoin
+  rest_base: "https://api.kucoin.com"
+  ws_base: ""
+  record_window_s: 900
+  return_horizons_s: [5, 15, 30, 60, 300, 900]
+
+execution:
+  venue: kucoin
+  simulation:
+    latency_ms_median: 220
+    latency_ms_sigma: 0.55
+    telegram_fanout_ms_median: 90
+    telegram_fanout_ms_sigma: 0.6
+    slippage_bps_base: 35
+    slippage_impact_coeff: 250
+    assumed_depth_quote: 25000
+    taker_fee_bps: 10
+    reject_probability: 0.04
+  live:
+    api_key_env: "PUMPBOT_API_KEY"
+    api_secret_env: "PUMPBOT_API_SECRET"
+    passphrase_env: "PUMPBOT_API_PASSPHRASE"
+    recv_window_ms: 5000
+    # Enforced in code. Even a config mistake cannot put more than this into
+    # one order.
+    max_notional_quote_hard_cap: 3.0
+
+risk:
+  quote_asset: USDT
+  starting_equity: 10.0
+  # 2 USDT per trade. KuCoin's minimum is 0.1 USDT on every USDT pair, so this
+  # is comfortably above the floor while leaving room for concurrent slots.
+  position_notional_quote: 2.0
+  max_concurrent_positions: 3          # 6 USDT max exposure, 4 USDT always free
+  max_trades_per_run: 30
+  # 25% of a 10 USDT account is 2.50. Small enough to be survivable, large
+  # enough that a normal losing streak does not stop the test prematurely.
+  daily_drawdown_stop_pct: 25.0
+  symbol_cooldown_s: 900
+  # Set this once you have real scores. Zero means "trade every channel",
+  # which is only correct during discovery.
+  min_channel_score: 0.0
+  blocked_symbols: []
+
+strategy:
+  take_profit_ladder:
+    - { gain_pct: 4.0,  fraction: 0.50 }
+    - { gain_pct: 9.0,  fraction: 0.50 }
+  stop_loss_pct: 6.0
+  trailing_stop_pct: 5.0
+  max_hold_s: 120
+  max_entry_chase_pct: 6.0
+
+scoring:
+  min_signals_for_score: 12
+  primary_horizon_s: 30
+  relay_penalty_weight: 0.35
+  weights:
+    hit_rate: 0.30
+    median_return: 0.30
+    originator: 0.20
+    consistency: 0.20
+
+gate:
+  required_profitable_runs: 10
+  require_consecutive: true
+  min_trades_per_run: 5
+  min_net_return_pct: 0.0
+  state_file: "state/gate.json"
+
+reporting:
+  output_dir: "runs"
+  formats: [markdown, json, html]
+
+# ===========================================================================
+# What this can and cannot answer
+#
+# CAN — and these are worth knowing:
+#   - do orders actually reach the venue, fill, and come back parseable
+#   - is real latency anywhere near the simulated 220 ms
+#   - does the exit ladder fire on a real book, or does the sell round to zero
+#   - is realised slippage during an actual pump near the modelled 35 bps
+#   - does the bot survive a websocket drop, a rate limit, a delisted symbol
+#
+# CANNOT — no amount of care changes this:
+#   - whether the strategy is profitable
+#
+# Why not. Per-trade return dispersion for these trades is roughly 7%. To
+# distinguish an edge from zero at t=2 you need about (2 x 7 / edge)^2 trades:
+#
+#     edge/trade    trades needed    profit at 2 USDT/trade
+#         0.5%              740                    7.40 USDT
+#         1.0%              185                    3.70 USDT
+#         2.0%               47                    1.88 USDT
+#         3.0%               21                    1.26 USDT
+#
+# Measured round-trip cost on KuCoin at this size is about 0.42% (11 bps
+# slippage plus 10 bps taker, both ways), so anything under ~0.4% gross per
+# trade is negative before it starts.
+#
+# The money here is irrelevant by design. The information is the point: 47
+# trades to earn 1.88 USDT is a fine trade if what you bought was knowing
+# whether the edge is real.
+# ===========================================================================

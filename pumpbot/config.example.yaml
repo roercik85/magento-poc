@@ -55,9 +55,17 @@ parsing:
 # Market data (used for simulated fills, mark-to-market and channel scoring)
 # ---------------------------------------------------------------------------
 marketdata:
-  venue: binance
-  rest_base: "https://api.binance.com"
-  ws_base: "wss://stream.binance.com:9443"
+  venue: kucoin              # kucoin | binance
+  rest_base: "https://api.kucoin.com"
+  ws_base: ""                # KuCoin issues its ws endpoint per session
+  # How long to keep recording ticks after a symbol is called.
+  #
+  # IMPORTANT: KuCoin serves klines no finer than 1 minute and only the last
+  # ~100 trades, so there is NO way to backfill sub-minute prices after the
+  # fact. `pumpbot record` captures ticks live for every called symbol. If you
+  # skip that, the calls you record can never be scored — a 30-second pump is
+  # invisible in a 1-minute bar.
+  record_window_s: 900
   # Poll interval for the post-signal return curve used by the channel scorer.
   return_horizons_s: [5, 15, 30, 60, 300, 900, 3600]
 
@@ -65,7 +73,7 @@ marketdata:
 # Execution
 # ---------------------------------------------------------------------------
 execution:
-  venue: binance
+  venue: kucoin              # kucoin | binance
   # Simulated execution model. These numbers decide whether your backtest is
   # honest or a fairy tale. Defaults are deliberately pessimistic.
   simulation:
@@ -77,10 +85,22 @@ execution:
     telegram_fanout_ms_median: 90
     telegram_fanout_ms_sigma: 0.6
     # Slippage model: bps of adverse fill = base + impact * (notional / depth)
+    #
+    # Calibration note. Measured against live KuCoin books (12 low-cap USDT
+    # pairs, 5k-400k USDT daily volume): a 5-10 USDT market order cost ~11 bps
+    # one-way, 50 USDT ~16 bps, 200 USDT ~36 bps, against a median half-spread
+    # of 11 bps. So in CALM conditions the default below is about 3x
+    # pessimistic.
+    #
+    # It stays there deliberately. Those books were calm. During the pump you
+    # are trying to trade, everyone sweeps at once: the spread blows out and
+    # near depth vanishes. Tuning this down to the calm number is the most
+    # direct way to build a backtest you cannot reproduce with money.
     slippage_bps_base: 35
     slippage_impact_coeff: 250
     # Assumed top-of-book depth in quote currency for a low-cap pump target.
     assumed_depth_quote: 25000
+    # KuCoin spot taker is 0.1% at base tier; Binance 0.1% (0.075% with BNB).
     taker_fee_bps: 10
     # Probability the order is simply rejected (symbol halted, no liquidity,
     # exchange rate-limits you at exactly the wrong moment).
@@ -89,7 +109,8 @@ execution:
   live:
     api_key_env: "PUMPBOT_API_KEY"
     api_secret_env: "PUMPBOT_API_SECRET"
-    recv_window_ms: 5000
+    passphrase_env: "PUMPBOT_API_PASSPHRASE"   # KuCoin only; checked at startup
+    recv_window_ms: 5000                        # Binance only
     # Hard ceiling enforced in code, independent of risk config.
     max_notional_quote_hard_cap: 100.0
 
@@ -99,7 +120,10 @@ execution:
 risk:
   quote_asset: USDT
   starting_equity: 1000.0
-  position_notional_quote: 50.0       # per trade
+  # Per trade. KuCoin's minimum is 0.1 USDT on every USDT pair, so a small
+  # live test is not blocked by order minimums. For a 10 USDT account, 2.0
+  # here gives ~5 concurrent slots and survives a long losing run.
+  position_notional_quote: 50.0
   max_concurrent_positions: 3
   max_trades_per_run: 50
   # Stop the run entirely if cumulative PnL drops below this fraction of start.

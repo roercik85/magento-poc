@@ -84,17 +84,26 @@ pumpbot record --out data/recorded/corpus.jsonl
 Listens and logs. Places no orders. This is the step people skip and it is the
 only one that produces information. Run it for **weeks**, not hours.
 
-### 3. `fetch-prices` — get the prices to judge against
+### 3. `fetch-prices` — get the prices to judge against *(Binance only)*
 
 ```bash
 pumpbot fetch-prices data/recorded/corpus.jsonl --out data/recorded/prices.jsonl
 ```
 
 Pulls 1-second klines around every call in the corpus. **`score` and
-`simulate --corpus` refuse to run without this**, because replaying real
+`simulate --corpus` refuse to run without prices**, because replaying real
 messages against the built-in synthetic feed would produce confident numbers
 about a market that does not exist. `--synthetic-prices` overrides the refusal
 for pipeline testing and says loudly that the output is meaningless.
+
+> **On KuCoin there is no backfill — skip this step, it cannot work.** KuCoin
+> serves klines no finer than 1 minute and only the last ~100 trades (about
+> half a minute on a liquid pair). A 30-second pump is invisible in a 1-minute
+> bar. So `pumpbot record` captures ticks **live**, via the trade websocket,
+> subscribing to each symbol the moment a channel names it and writing 1-second
+> bars in the same format this command produces. Run `record` with market data
+> enabled from day one: messages recorded without matching ticks can never be
+> scored, at any price, and you will not find that out until you try.
 
 Expect a meaningful fraction of symbols to come back empty — delisted, never
 listed on your venue, or outside its 1-second kline retention. Those calls are
@@ -133,9 +142,37 @@ pumpbot gate
 
 ```bash
 export PUMPBOT_API_KEY=... PUMPBOT_API_SECRET=...
-pumpbot live --dry-run                       # builds and signs orders, sends nothing
-pumpbot live --i-accept-live-trading-risk
+export PUMPBOT_API_PASSPHRASE=...            # KuCoin only; checked at startup
+pumpbot -c config.10usd.yaml live --dry-run  # builds and signs, sends nothing
+pumpbot -c config.10usd.yaml live --i-accept-live-trading-risk
 ```
+
+## The 10 USDT test
+
+`config.10usd.yaml` is a ready profile: 2 USDT per trade, 3 concurrent slots,
+6 USDT maximum exposure, 3 USDT hard cap per order, 25% drawdown stop. KuCoin's
+0.1 USDT minimum means nothing about this size is artificial.
+
+**It answers real questions:** do orders reach the venue and fill; is real
+latency near the simulated 220 ms; does the exit ladder fire on a real book or
+does the sell round to zero; is slippage during an actual pump anywhere near
+35 bps; does the bot survive a websocket drop and a delisted symbol.
+
+**It cannot tell you whether the strategy is profitable.** Per-trade dispersion
+for these trades is around 7%, so distinguishing an edge from zero needs
+roughly `(2 × 7 / edge)²` trades:
+
+| True edge per trade | Trades needed | Profit at 2 USDT/trade |
+|---|---|---|
+| 0.5% | 740 | 7.40 USDT |
+| 1.0% | 185 | 3.70 USDT |
+| 2.0% | 47 | 1.88 USDT |
+| 3.0% | 21 | 1.26 USDT |
+
+Measured round-trip cost at this size is ~0.42%, so anything under ~0.4% gross
+per trade is negative before it starts. The money is irrelevant by design —
+47 trades to earn 1.88 USDT is a good trade if what you bought was finding out
+whether the edge is real.
 
 ## The promotion gate
 
@@ -157,6 +194,31 @@ The gate opening is *permission*, not *recommendation*. Live still needs
 Every report also carries a **significance test** on per-trade returns. A
 thirty-trade run almost never clears |t| = 2, and the report says so plainly —
 because ten such runs in a row is exactly how noise passes a ten-run gate.
+
+## Venues
+
+| | KuCoin | Binance |
+|---|---|---|
+| Live execution | ✅ | ✅ |
+| Tradable USDT pairs | 833 | — |
+| Minimum order | **0.1 USDT**, every pair | 5 USDT on most pairs |
+| Taker fee | 0.1% | 0.1% |
+| Historical sub-minute prices | ❌ none — must record live | ✅ 1s klines via REST |
+| Measured slippage, 10 USDT order | ~12 bps one-way | — |
+
+KuCoin is the default. It is where low-cap pump targets more often live, its
+0.1 USDT minimum makes small live tests possible, and its books at 5-10 USDT
+cost about 12 bps one-way — measured across twelve pairs in the 5k-400k USDT
+daily volume band, against a median half-spread of 11 bps.
+
+The trade-off is the data: **Binance lets you backfill prices after the fact,
+KuCoin does not.** On KuCoin the market data has to be captured while the call
+is live or it is gone. That is why `record` runs a tick recorder rather than
+leaving prices to a later step.
+
+> Measured on calm books. During the pump you are trying to trade, everyone
+> sweeps at once and realised slippage is a multiple of this. The simulator's
+> 35 bps default is deliberately left about 3x above the calm measurement.
 
 ## Latency
 
@@ -212,8 +274,8 @@ risk/manager.py       cooldowns, concurrency, drawdown halt, channel filter
    ↓
 strategy/pump.py      entry chase guard; stop / trailing / ladder / time exits
    ↓
-execution/            simulator.py (pessimistic) | live_binance.py (warm path)
-marketdata/           feed.py (live + synthetic) | historical.py (klines)
+execution/            simulator.py | live_binance.py | live_kucoin.py
+marketdata/           feed.py (synthetic) | historical.py | kucoin.py (ticks)
    ↓
 scoring/channels.py   hit rate, net median, originator, pre-post run
    ↓
@@ -237,7 +299,7 @@ tell you this strategy prints money. It does not.
 ## Tests
 
 ```bash
-pytest -q        # 113 tests
+pytest -q        # 139 tests
 ```
 
 Covering parser precision (including the false positives that would fire market
@@ -264,6 +326,11 @@ from your account balance.
 - **Solana/EVM contract signals are parsed but not routed.** DEX execution
   (Jupiter/Raydium, Jito bundles, honeypot and liquidity checks) is not
   implemented. Contract-address calls are scored, not traded.
+- **Finding the channels is not automated, and cannot be.** `discover`
+  enumerates what your account can see; which of them are worth trading is
+  decided by `record` + `score` on observed outcomes. A list of channel names
+  from a web search is the marketing material this whole scoring module exists
+  to distrust.
 - **Image and OCR signals are ignored.** Some channels post the ticker as an
   image specifically to slow bots down.
 - **The significance test assumes independent, roughly normal returns.** Pump

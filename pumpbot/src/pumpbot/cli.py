@@ -103,10 +103,38 @@ def cmd_record(args: argparse.Namespace) -> int:
     feed = SyntheticPumpFeed(seed=0)
     executor = SimulatedExecutor(cfg.execution.simulation, feed)
 
+    market = None
+    prices = Path(args.prices_out or "data/recorded/prices.jsonl")
+    if cfg.marketdata.venue == "kucoin" and not args.no_market_data:
+        from .marketdata.kucoin import KucoinRecordingSession
+
+        market = KucoinRecordingSession(
+            prices,
+            window_s=cfg.marketdata.record_window_s,
+            rest_base=cfg.marketdata.rest_base,
+        )
+
     print(f"▸ recording to {corpus} on {loop_impl}. Ctrl-C to stop. No orders will be placed.")
-    runner = LiveRunner(cfg, executor=executor, feed=feed, logbook=log, record_only=True)
+    if market is not None:
+        print(f"▸ market data → {prices} (+ raw ticks alongside), "
+              f"{cfg.marketdata.record_window_s}s per called symbol")
+    elif not args.no_market_data:
+        print("▸ no tick recorder for this venue; prices will need backfilling "
+              "with `pumpbot fetch-prices`")
+    else:
+        print("⚠ --no-market-data: messages only. On KuCoin there is no historical "
+              "sub-minute data, so these calls will never be scoreable.")
+
+    runner = LiveRunner(
+        cfg, executor=executor, feed=feed, logbook=log, record_only=True, market=market
+    )
     result = asyncio.run(_run_with_sigint(runner))
-    print(f"▸ recorded {result.messages_seen} messages, {result.signals_parsed} parsed as signals")
+    print(f"▸ recorded {result.messages_seen} messages, "
+          f"{result.signals_parsed} parsed as signals")
+    if market is not None:
+        print(f"▸ {market.bars_written:,} 1s bars across "
+              f"{len(market.recorder.symbols_recorded)} symbol(s), "
+              f"{market.recorder.ticks_seen:,} ticks, {market.reconnects} reconnect(s)")
     return _finish(cfg, result, args)
 
 
@@ -128,23 +156,46 @@ def cmd_live(args: argparse.Namespace) -> int:
         return 2
 
     loop_impl = _install_uvloop()
-
-    from .execution.live_binance import BinanceLiveExecutor
-    from .marketdata.feed import BinanceFeed
-
-    feed = BinanceFeed(cfg.marketdata.rest_base)
-    executor = BinanceLiveExecutor(
-        cfg.execution.live,
-        cfg.marketdata.rest_base,
-        hard_cap_quote=cfg.execution.live.max_notional_quote_hard_cap,
-        dry_run=args.dry_run,
-    )
-
     cap = cfg.execution.live.max_notional_quote_hard_cap
-    print(f"▸ LIVE on {loop_impl}. Per-trade notional {cfg.risk.position_notional_quote} "
-          f"{cfg.risk.quote_asset}, hard cap {cap}. Ctrl-C to stop.")
+    market = None
+
+    if cfg.execution.venue == "kucoin":
+        from .execution.live_kucoin import KucoinLiveExecutor
+        from .marketdata.kucoin import KucoinRecordingSession
+
+        # The recorder doubles as the live price feed: the same tick stream
+        # that marks open positions is the one written to disk, so a live run
+        # produces a scoreable corpus as a side effect.
+        market = KucoinRecordingSession(
+            Path("data/recorded/live_prices.jsonl"),
+            window_s=cfg.marketdata.record_window_s,
+            rest_base=cfg.marketdata.rest_base,
+        )
+        feed = market.feed
+        executor = KucoinLiveExecutor(
+            cfg.execution.live,
+            cfg.marketdata.rest_base,
+            hard_cap_quote=cap,
+            dry_run=args.dry_run,
+            passphrase_env=cfg.execution.live.passphrase_env,
+        )
+    else:
+        from .execution.live_binance import BinanceLiveExecutor
+        from .marketdata.feed import BinanceFeed
+
+        feed = BinanceFeed(cfg.marketdata.rest_base)
+        executor = BinanceLiveExecutor(
+            cfg.execution.live,
+            cfg.marketdata.rest_base,
+            hard_cap_quote=cap,
+            dry_run=args.dry_run,
+        )
+
+    print(f"▸ LIVE on {cfg.execution.venue} ({loop_impl}). Per-trade notional "
+          f"{cfg.risk.position_notional_quote} {cfg.risk.quote_asset}, hard cap {cap}. "
+          f"Ctrl-C to stop.")
     log = Logbook(Path("data/recorded/live.jsonl"))
-    runner = LiveRunner(cfg, executor=executor, feed=feed, logbook=log)
+    runner = LiveRunner(cfg, executor=executor, feed=feed, logbook=log, market=market)
     result = asyncio.run(_run_with_sigint(runner))
     return _finish(cfg, result, args)
 
@@ -478,6 +529,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     rec = sub.add_parser("record", help="listen and log; never trades")
     rec.add_argument("--out", help="corpus path (default data/recorded/corpus.jsonl)")
+    rec.add_argument("--prices-out",
+                     help="tick/bar output (default data/recorded/prices.jsonl)")
+    rec.add_argument("--no-market-data", action="store_true",
+                     help="record messages only — on KuCoin this makes the corpus "
+                          "permanently unscoreable")
     _common(rec)
     rec.set_defaults(func=cmd_record)
 

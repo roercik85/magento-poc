@@ -129,13 +129,22 @@ class LiveRunner:
         logbook: Optional[Logbook] = None,
         tick_interval_s: float = 0.25,
         record_only: bool = False,
+        market=None,                            # noqa: ANN001 - recording session
     ) -> None:
         self.cfg = cfg
         self._log = logbook
         self._tick_s = tick_interval_s
         self._record_only = record_only
-        self.engine = Engine(cfg, executor=executor, feed=feed, logbook=logbook)
+        # Market-data recorder. On venues with no historical sub-minute data —
+        # KuCoin among them — this is the only chance to capture what the price
+        # did around a call. Miss it and the call is unscoreable forever.
+        self.market = market
+        self.engine = Engine(
+            cfg, executor=executor, feed=feed, logbook=logbook,
+            on_signal=self._note_market_symbol if market is not None else None,
+        )
         self._ingest = None
+        self._http = None
         self._stop = asyncio.Event()
 
     async def run(self) -> RunResult:
@@ -148,6 +157,12 @@ class LiveRunner:
         await self._ingest.start()
         await self.executor_start()
 
+        if self.market is not None:
+            import aiohttp
+
+            self._http = aiohttp.ClientSession()
+            await self.market.start(self._http)
+
         ticker = asyncio.create_task(self._tick_loop(), name="exit-ticker")
         warmer = asyncio.create_task(self._warm_loop(), name="connection-warmer")
         try:
@@ -159,6 +174,10 @@ class LiveRunner:
                     await task
             await self.engine.close_all(wall_ms())
             await self._ingest.stop()
+            if self.market is not None:
+                await self.market.stop()
+            if self._http is not None:
+                await self._http.close()
             await self.engine.executor.close()
             if self._log is not None:
                 await self._log.stop()
@@ -188,15 +207,32 @@ class LiveRunner:
                 source_session=raw.source_session,
             )
         if self._record_only:
-            # Still parse, so the corpus carries parser output and the channel
-            # scorer accumulates — just never send an order.
+            # Still parse, so the corpus carries parser output and the market
+            # recorder knows what to subscribe to — just never send an order.
             self.engine.messages_seen += 1
             signal = self.engine.extractor.extract(raw)
             if signal is not None:
                 self.engine.signals_parsed += 1
+                self._note_market_symbol(signal)
             return
 
+        # The engine fires _note_market_symbol itself, via its on_signal hook,
+        # so the symbol is subscribed without parsing the message twice.
         await self.engine.handle_message(raw)
+
+    def _note_market_symbol(self, signal):                    # noqa: ANN001
+        if self.market is None:
+            return None
+        symbol = signal.symbol
+        if not symbol:
+            return None
+        venue = self.market.note_symbol(symbol, signal.raw.received_wall_ms)
+        if venue is None and self._log is not None:
+            # Unlisted symbols are the norm, not an error: plenty of calls name
+            # tokens this venue has never carried. Logged so the report can say
+            # how much of the channel's output is untradable here at all.
+            self._log.record("unlisted", run_id=self.engine.run_id, symbol=symbol)
+        return venue
 
     async def _tick_loop(self) -> None:
         while not self._stop.is_set():
