@@ -165,3 +165,53 @@ def test_summarise_counts_survivors(ex):
     stats = summarise([good, bad])
     assert stats == {"channels": 2, "rejected": 1, "kept": 1,
                      "median_calls_per_day": pytest.approx(good.calls_per_day)}
+
+
+# --- thin samples and venue validation -------------------------------------
+def test_a_single_message_is_not_a_firehose(ex):
+    """One post over zero elapsed days divided out to a million calls a day
+    and was rejected for posting too much."""
+    s = screen(history(["BUY $NEX NOW"], span_days=0.0), ex)
+    assert s.calls_per_day == 0.0
+    assert "INSUFFICIENT" in s.verdict
+    assert "firehose" not in s.verdict.lower()
+
+
+def test_a_short_window_is_reported_as_insufficient(ex):
+    s = screen(history(calls(4), span_days=0.01), ex)
+    assert "INSUFFICIENT" in s.verdict
+
+
+def test_cadence_is_computed_once_there_is_enough_span(ex):
+    s = screen(history(calls(30), span_days=10.0), ex)
+    assert s.calls_per_day == pytest.approx(3.0)
+    assert "INSUFFICIENT" not in s.verdict
+
+
+def test_calls_are_counted_only_when_the_venue_lists_them(ex):
+    listed = {"AAAXUSDT"}
+    s = screen(history(calls(30), span_days=10.0), ex,
+               is_tradable=lambda sym: sym in listed)
+    assert s.calls == 1
+    assert s.calls_per_day == pytest.approx(0.1)
+
+
+def test_a_channel_whose_calls_are_all_unlisted_is_rejected(ex):
+    """Exactly the observed case: 35 apparent calls, zero tradable."""
+    s = screen(history(calls(30), span_days=10.0), ex,
+               is_tradable=lambda sym: False)
+    assert s.calls == 0
+    assert s.rejected
+    assert "none naming a symbol listed" in s.verdict
+
+
+def test_a_low_listed_ratio_is_flagged(ex):
+    listed = {f"{_sym(i)}USDT" for i in range(5)}
+    s = screen(history(calls(30), span_days=10.0), ex,
+               is_tradable=lambda sym: sym in listed)
+    assert any("name a listed symbol" in f for f in s.flags)
+
+
+def test_no_validator_means_every_parse_counts(ex):
+    s = screen(history(calls(30), span_days=10.0), ex)
+    assert s.calls == 30

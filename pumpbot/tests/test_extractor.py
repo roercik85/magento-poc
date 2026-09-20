@@ -127,3 +127,76 @@ def test_spaced_pair_is_matched(ex):
     sig = ex.extract(msg("Next call is LIVE: MYRO USDT — go go go"))
     assert sig is not None
     assert sig.base == "MYRO"
+
+
+# ---------------------------------------------------------------------------
+# Regressions from a real channel: one month of posts produced 35 "calls" and
+# not one named a symbol any venue lists.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        # The pair pattern extracts BTC, which is an ignored major.
+        ("#BTCUSDT long setup 🚀", None),
+        ("$ETHUSDT target hit", None),
+        ("BTC/USDT breakout incoming", None),
+        # Prose that lands in the ticker slot after a verb.
+        ("LONG SETUP incoming, get ready", None),
+        ("Quick SCALP now", None),
+        ("Trade CLOSED in profit 🚀", None),
+        ("UPDATE: we are in profit 🔥", None),
+        ("Thanks for the FEEDBACK everyone!", None),
+        ("BITCOIN buy now", None),
+        ("buy the SUPPORT zone", None),
+        ("watch this RESISTANCE level", None),
+        # Real calls must survive all of it.
+        ("BUY $PEPE NOW 🚀", "PEPEUSDT"),
+        ("MYRO USDT go go go", "MYROUSDT"),
+    ],
+)
+def test_real_channel_prose_is_not_a_call(ex, text, expected):
+    sig = ex.extract(msg(text))
+    assert (sig.symbol if sig else None) == expected
+
+
+def test_a_base_carrying_the_quote_is_not_doubled():
+    """"#BTCUSDT" parsed to a base of BTCUSDT, and appending the quote made
+    BTCUSDTUSDT — a symbol no venue lists, so the call was dropped as
+    untradable instead of recognised as a major to ignore."""
+    ex = SignalExtractor(quote_assets=["USDT"], min_confidence=0.0)
+    sig = ex.extract(msg("$WIFUSDT pumping now"))
+    assert sig is not None
+    assert sig.symbol == "WIFUSDT"
+    assert not sig.symbol.endswith("USDTUSDT")
+
+
+def test_ignored_majors_are_caught_through_a_full_pair():
+    ex = SignalExtractor(ignore_symbols=["BTC"], quote_assets=["USDT"],
+                         min_confidence=0.0)
+    assert ex.extract(msg("$BTCUSDT to the moon")) is None
+
+
+def test_default_config_ignores_the_majors():
+    """The shipped YAML listed them; the built-in defaults did not, so any
+    run without a config treated every BTC mention as a call."""
+    from pumpbot.config import Config
+
+    cfg = Config()
+    assert "BTC" in cfg.parsing.ignore_symbols
+    assert "ETH" in cfg.parsing.ignore_symbols
+
+    ex = SignalExtractor(
+        ignore_symbols=cfg.parsing.ignore_symbols,
+        quote_assets=cfg.parsing.quote_assets,
+        min_confidence=cfg.parsing.min_confidence,
+    )
+    assert ex.extract(msg("#BTCUSDT long setup 🚀")) is None
+    assert ex.extract(msg("BUY $PEPE NOW")) is not None
+
+
+def test_default_ignore_list_is_not_shared_between_configs():
+    from pumpbot.config import Config
+
+    a, b = Config(), Config()
+    a.parsing.ignore_symbols.clear()
+    assert b.parsing.ignore_symbols

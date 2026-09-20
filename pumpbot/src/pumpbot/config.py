@@ -56,10 +56,24 @@ class TelegramConfig:
     watch_edits: bool = True
 
 
+def _default_ignore_symbols() -> List[str]:
+    """Majors and stables, which are never a pump target.
+
+    These have to be on by default, not only in the shipped YAML. A channel
+    discussing BTC in passing otherwise produces a "call" on every post, which
+    inflates its cadence and buries the handful of real calls in noise.
+    """
+    return [
+        "BTC", "ETH", "USDT", "USDC", "BNB", "SOL", "XRP", "ADA", "DOGE",
+        "TRX", "DAI", "BUSD", "TUSD", "WBTC", "WETH", "STETH", "LINK",
+        "MATIC", "DOT", "AVAX",
+    ]
+
+
 @dataclass
 class ParsingConfig:
     min_confidence: float = 0.55
-    ignore_symbols: List[str] = field(default_factory=list)
+    ignore_symbols: List[str] = field(default_factory=_default_ignore_symbols)
     quote_assets: List[str] = field(default_factory=lambda: ["USDT"])
     accept_contracts: bool = True
 

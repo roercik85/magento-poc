@@ -76,6 +76,20 @@ _STOPWORDS: Set[str] = {
     "SOON", "PUMP", "DUMP", "MOON", "LONG", "SHORT", "ENTRY", "EXIT",
     "TARGET", "STOP", "LOSS", "PROFIT", "GAIN", "CALL", "COIN", "TOKEN",
     "USDT", "USDC", "BUSD", "FDUSD", "HTTP", "HTTPS", "WWW", "COM", "IO",
+    # Words that follow a verb in ordinary channel prose and therefore land
+    # in the ticker slot: "LONG SETUP", "trade CLOSED", "quick SCALP". Every
+    # one of these was mined from a real channel's month of posts, where the
+    # parser reported 35 calls and not one named a tradable symbol.
+    "SETUP", "SCALP", "SWING", "CLOSED", "CLOSE", "OPEN", "OPENED", "UPDATE",
+    "FEEDBACK", "RESULT", "RESULTS", "SIGNAL", "SIGNALS", "TRADE", "TRADES",
+    "POSITION", "LEVERAGE", "MARGIN", "FUTURES", "SPOT", "CHART", "ANALYSIS",
+    "SUPPORT", "RESISTANCE", "BREAKOUT", "REVERSAL", "TREND", "VOLUME",
+    "MARKET", "PRICE", "ZONE", "RANGE", "LEVEL", "LEVELS", "MOVE", "READY",
+    "LIVE", "FREE", "PAID", "PLAN", "RISK", "SIZE", "PART", "TEAM", "NEWS",
+    "ALERT", "WATCH", "READ", "JOIN", "LINK", "HERE", "THIS", "THAT", "WITH",
+    "FROM", "INTO", "OVER", "MORE", "LESS", "BEST", "GOOD", "NICE", "WELL",
+    "DONE", "SAFE", "SURE", "HOLD", "WAIT", "KEEP", "TAKE", "MAKE", "SEND",
+    "BITCOIN", "ETHEREUM", "SOLANA", "RIPPLE", "CARDANO", "TETHER",
 }
 
 
@@ -131,7 +145,7 @@ class SignalExtractor:
                     )
             return None
 
-        if base in self._ignore:
+        if base in self._ignore or self._strip_quote(base) in self._ignore:
             return None
 
         confidence = pattern_conf
@@ -153,7 +167,7 @@ class SignalExtractor:
         return Signal.new(
             raw,
             kind=SignalKind.SYMBOL,
-            symbol=f"{base}{self._quotes[0]}",
+            symbol=self._as_pair(base),
             base=base,
             contract=None,
             chain=None,
@@ -189,6 +203,24 @@ class SignalExtractor:
             return m.group(1), "cashtag", 0.72
 
         return None, "", 0.0
+
+    def _strip_quote(self, base: str) -> str:
+        for quote in self._quotes:
+            if len(base) > len(quote) and base.endswith(quote):
+                return base[: -len(quote)]
+        return base
+
+    def _as_pair(self, base: str) -> str:
+        """Append the quote asset, unless the base already ends with one.
+
+        "#BTCUSDT" parses to a base of BTCUSDT, and naively appending the quote
+        produced BTCUSDTUSDT — a symbol no venue lists, so the call was silently
+        dropped as untradable rather than recognised as BTC.
+        """
+        for quote in self._quotes:
+            if len(base) > len(quote) and base.endswith(quote):
+                return base
+        return f"{base}{self._quotes[0]}"
 
     def _acceptable(self, token: str) -> bool:
         if token in _STOPWORDS or token in self._ignore:

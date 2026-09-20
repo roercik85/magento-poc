@@ -86,6 +86,7 @@ class StructuralScreen:
     messages: int
     span_days: float
     calls: int
+    tradable_calls: int
     calls_per_day: float
     forward_ratio: float
     paid_pitch_ratio: float
@@ -159,17 +160,33 @@ async def read_history(
     return history
 
 
+# Below this, cadence is meaningless: one message over a few minutes divides
+# out to millions of calls a day and trips the firehose rule, which is how a
+# channel with a single post got rejected for posting too much.
+_MIN_SPAN_DAYS_FOR_CADENCE = 0.5
+_MIN_MESSAGES_FOR_CADENCE = 5
+
+
 def screen(
     history: ChannelHistory,
     extractor: SignalExtractor,
     *,
     min_signals_for_score: int = 12,
+    is_tradable=None,                            # noqa: ANN001 - Callable[[str], bool]
 ) -> StructuralScreen:
+    """Judge a channel on structure alone.
+
+    ``is_tradable`` filters calls down to symbols the venue actually lists.
+    Without it a channel's prose false positives count as calls, which
+    inflates its cadence and can reject it for volume it never had — or, worse,
+    let it through on a call count that is entirely noise.
+    """
     total = len(history.messages)
     if total == 0:
         return StructuralScreen(
             chat_id=history.chat_id, name=history.name, messages=0,
-            span_days=history.span_days, calls=0, calls_per_day=0.0,
+            span_days=history.span_days, calls=0, tradable_calls=0,
+            calls_per_day=0.0,
             forward_ratio=0.0, paid_pitch_ratio=0.0, preannounce_ratio=0.0,
             edit_ratio=0.0, repeat_symbol_ratio=0.0, days_to_scoreable=None,
             flags=["no messages in window"],
@@ -179,15 +196,26 @@ def screen(
     paid = sum(1 for m in history.messages if _RE_PAID.search(m.text))
     pre = sum(1 for m in history.messages if _RE_PREANNOUNCE.search(m.text))
 
+    parsed: List[str] = []
     symbols: List[str] = []
     for m in history.messages:
         sig = extractor.extract(m)
-        if sig is not None and sig.symbol:
+        if sig is None or not sig.symbol:
+            continue
+        parsed.append(sig.symbol)
+        if is_tradable is None or is_tradable(sig.symbol):
             symbols.append(sig.symbol)
 
     calls = len(symbols)
-    span = max(history.span_days, 1e-6)
-    calls_per_day = calls / span
+
+    # Cadence needs enough span and enough messages to mean anything.
+    if (
+        history.span_days >= _MIN_SPAN_DAYS_FOR_CADENCE
+        and total >= _MIN_MESSAGES_FOR_CADENCE
+    ):
+        calls_per_day = calls / history.span_days
+    else:
+        calls_per_day = 0.0
 
     counts = Counter(symbols)
     repeated = sum(n for n in counts.values() if n > 1)
@@ -196,6 +224,10 @@ def screen(
     days_to_scoreable = (
         min_signals_for_score / calls_per_day if calls_per_day > 0 else None
     )
+    thin = (
+        history.span_days < _MIN_SPAN_DAYS_FOR_CADENCE
+        or total < _MIN_MESSAGES_FOR_CADENCE
+    )
 
     s = StructuralScreen(
         chat_id=history.chat_id,
@@ -203,6 +235,7 @@ def screen(
         messages=total,
         span_days=history.span_days,
         calls=calls,
+        tradable_calls=calls,
         calls_per_day=calls_per_day,
         forward_ratio=history.forwards / max(total, 1),
         paid_pitch_ratio=paid / total,
@@ -211,12 +244,34 @@ def screen(
         repeat_symbol_ratio=repeat_ratio,
         days_to_scoreable=days_to_scoreable,
     )
-    _apply_verdict(s)
+    _apply_verdict(s, thin=thin, parsed=len(parsed))
     return s
 
 
-def _apply_verdict(s: StructuralScreen) -> None:
+def _apply_verdict(s: StructuralScreen, *, thin: bool = False,
+                   parsed: int = 0) -> None:
     flags = s.flags
+
+    if thin:
+        s.verdict = (
+            f"INSUFFICIENT — {s.messages} message(s) over {s.span_days:.1f}d is "
+            f"not enough to judge anything. Export a wider date range."
+        )
+        return
+
+    # A channel whose parses are mostly symbols the venue does not list is
+    # either calling tokens you cannot trade here, or is not making calls at
+    # all and the parser is reading prose.
+    if parsed and s.calls == 0:
+        s.verdict = (
+            f"REJECT — {parsed} apparent call(s), none naming a symbol listed "
+            f"on this venue. Either it trades elsewhere, or those are not calls."
+        )
+        return
+    if parsed >= 5 and s.calls / parsed < 0.35:
+        flags.append(
+            f"only {s.calls}/{parsed} apparent calls name a listed symbol"
+        )
 
     if s.paid_pitch_ratio > 0.05:
         flags.append(

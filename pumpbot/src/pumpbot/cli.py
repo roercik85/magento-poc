@@ -565,18 +565,33 @@ def cmd_triage(args: argparse.Namespace) -> int:
             finally:
                 await client.disconnect()
 
-        screens = [screen(h, extractor, min_signals_for_score=args.min_calls)
-                   for h in histories]
+        # Load the venue's listings before screening, so a channel's cadence
+        # counts calls that could actually be traded here rather than every
+        # regex hit. Prose false positives would otherwise inflate a channel's
+        # call rate and can reject it for volume it never had.
+        async with aiohttp.ClientSession() as session:
+            symbols = await KucoinSymbols.load(session, cfg.marketdata.rest_base)
+        print(f"\n▸ {len(symbols)} symbols listed on {cfg.marketdata.venue}")
+
+        def is_tradable(symbol: str) -> bool:
+            return symbols.resolve(symbol) is not None
+
+        screens = [
+            screen(h, extractor, min_signals_for_score=args.min_calls,
+                   is_tradable=is_tradable)
+            for h in histories
+        ]
         screens.sort(key=lambda s: (s.rejected, -s.calls_per_day))
 
         print(f"\n{'channel':<30} {'msgs':>6} {'calls':>6} {'/day':>6} "
               f"{'fwd':>5} {'paid':>5} {'pre':>5}  verdict")
         print("─" * 104)
         for sc in screens:
+            per_day = f"{sc.calls_per_day:>6.1f}" if sc.calls_per_day else "     —"
             print(f"{sc.name[:30]:<30} {sc.messages:>6} {sc.calls:>6} "
-                  f"{sc.calls_per_day:>6.1f} {100*sc.forward_ratio:>4.0f}% "
+                  f"{per_day} {100*sc.forward_ratio:>4.0f}% "
                   f"{100*sc.paid_pitch_ratio:>4.0f}% {100*sc.preannounce_ratio:>4.0f}%  "
-                  f"{sc.verdict[:42]}")
+                  f"{sc.verdict[:46]}")
 
         flagged = [sc for sc in screens if sc.flags]
         if flagged:
@@ -610,7 +625,6 @@ def cmd_triage(args: argparse.Namespace) -> int:
 
         prices_path = Path(args.prices_out)
         async with aiohttp.ClientSession() as session:
-            symbols = await KucoinSymbols.load(session, cfg.marketdata.rest_base)
             listed = {s for s, _ in pairs if symbols.resolve(s)}
             unlisted = {s for s, _ in pairs} - listed
             print(f"\n▸ {len(pairs)} calls across {len(listed)} symbol(s) listed on "
