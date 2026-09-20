@@ -154,16 +154,19 @@ server and then silently never delivered, which leaves nothing to debug.
 
 There are two macOS apps called Telegram and they export differently:
 
-| App | Where | Export |
-|---|---|---|
-| **Telegram Desktop** | desktop.telegram.org | Settings → Advanced → Export Telegram data — whole account at once |
-| **Telegram for macOS** | Mac App Store | No global export; right-click a chat → Export Chat History, one at a time |
+**Export one channel at a time**, from the chat list: right-click the channel
+→ *Export chat history* → format **JSON**, media **off**.
 
-Either works. Choose format **Machine-readable JSON**, include the channels,
-and turn media off — media is gigabytes and triage reads only text. With the
-App Store app you end up with one folder per channel; point `--from-export` at
-the folder holding them all and they are found, merged and de-duplicated
-(per-chat exports taken on different days overlap).
+The account-wide export under Settings → Advanced does *not* work for this.
+It fixes public channels at **"only my messages"** and the checkbox cannot be
+cleared — the content belongs to the channel owner — so a broadcast channel you
+merely read exports with zero messages. `triage` detects that case and says so
+rather than reporting an empty result.
+
+Per-chat export has no such limit. You end up with one folder per channel;
+put them in one directory and point `--from-export` at it. They are found
+recursively, merged and de-duplicated, since exports taken on different days
+overlap. Media off matters: it is gigabytes, and triage reads only text.
 
 Recording still needs a working login later. The pass that decides whether any
 of this is worth doing does not.
@@ -385,7 +388,7 @@ tell you this strategy prints money. It does not.
 ## Tests
 
 ```bash
-pytest -q        # 218 tests
+pytest -q        # 222 tests
 ```
 
 Covering parser precision (including the false positives that would fire market

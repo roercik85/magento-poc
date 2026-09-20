@@ -498,22 +498,26 @@ def cmd_triage(args: argparse.Namespace) -> int:
         )
 
         if args.from_export:
-            from .ingest.telegram_export import ExportError, read_export
+            from .ingest.telegram_export import (
+                ExportError,
+                ExportStats,
+                explain_empty,
+                read_export,
+            )
 
+            stats = ExportStats()
             try:
-                histories = read_export(args.from_export, days=args.days)
+                histories = read_export(args.from_export, days=args.days, stats=stats)
             except ExportError as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 return 1
-            print(f"▸ reading {args.days}d from export {args.from_export}\n")
+            print(f"▸ reading {args.days}d from export {args.from_export} "
+                  f"({stats.files} file(s), {stats.channels_seen} channel(s))\n")
             for h in histories:
                 print(f"  · {h.name[:34]:<34} {len(h.messages):>5} msgs "
                       f"over {h.span_days:>5.1f}d")
             if not histories:
-                print(f"\nerror: no channel in the export has messages inside "
-                      f"{args.days} days. Try a longer --days, or check that the "
-                      f"export included the channels and their message text.",
-                      file=sys.stderr)
+                print(f"\nerror: {explain_empty(stats, args.days)}", file=sys.stderr)
                 return 1
         else:
             client = TelegramClient(

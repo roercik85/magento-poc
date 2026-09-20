@@ -291,3 +291,67 @@ def test_html_export_names_the_json_setting(tmp_path):
     (folder / "result.json").write_text("<html></html>", encoding="utf-8")
     with pytest.raises(ExportError, match="Machine-readable JSON"):
         read_export(folder, days=7)
+
+
+# --- diagnosing an empty export --------------------------------------------
+def test_only_my_messages_restriction_is_named(tmp_path):
+    """The bulk export lists public channels but exports none of their text,
+    which is indistinguishable from a bad date range unless you check whether
+    any channel had text at all."""
+    from pumpbot.ingest.telegram_export import ExportStats, explain_empty
+
+    path = write_export(tmp_path, [
+        chat("pump one", 111, []),
+        chat("pump two", 222, []),
+    ])
+    stats = ExportStats()
+    assert read_export(path, days=30, stats=stats) == []
+    assert stats.channels_seen == 2
+    assert stats.channels_with_text == 0
+    assert stats.looks_like_only_my_messages
+
+    why = explain_empty(stats, 30)
+    assert "only my messages" in why
+    assert "Export chat history" in why
+
+
+def test_a_stale_export_is_diagnosed_as_a_date_range(tmp_path, now):
+    from pumpbot.ingest.telegram_export import ExportStats, explain_empty
+
+    path = write_export(tmp_path, [
+        chat("alpha", 111, [msg(1, now - 90 * 86400, "BUY $OLD NOW")]),
+    ])
+    stats = ExportStats()
+    assert read_export(path, days=7, stats=stats) == []
+    assert not stats.looks_like_only_my_messages
+    assert stats.messages_outside_window == 1
+
+    why = explain_empty(stats, 7)
+    assert "outside the last 7 days" in why
+    assert "only my messages" not in why
+
+
+def test_an_export_with_content_is_not_flagged(tmp_path, now):
+    from pumpbot.ingest.telegram_export import ExportStats
+
+    path = write_export(tmp_path, [
+        chat("alpha", 111, [msg(1, now - 3600, "BUY $PEPE NOW")]),
+    ])
+    stats = ExportStats()
+    assert read_export(path, days=7, stats=stats)
+    assert stats.channels_with_text == 1
+    assert stats.messages_in_window == 1
+    assert not stats.looks_like_only_my_messages
+
+
+def test_stats_count_files_and_chats(tmp_path, now):
+    from pumpbot.ingest.telegram_export import ExportStats
+
+    single_chat_export(tmp_path / "a", "alpha", 111,
+                       [msg(1, now - 3600, "BUY $AAA NOW")])
+    single_chat_export(tmp_path / "b", "beta", 222,
+                       [msg(1, now - 3600, "BUY $BBB NOW")])
+    stats = ExportStats()
+    read_export(tmp_path, days=7, stats=stats)
+    assert stats.files == 2
+    assert stats.channels_seen == 2

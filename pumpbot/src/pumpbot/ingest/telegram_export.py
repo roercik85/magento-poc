@@ -29,6 +29,7 @@ Format notes, all of which bite:
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
@@ -153,24 +154,96 @@ def iter_chats(path: str | Path) -> Iterator[Dict[str, Any]]:
         yield from _chats_in(file)
 
 
+@dataclass
+class ExportStats:
+    """What an export actually contained, for diagnosing an empty one."""
+
+    files: int = 0
+    chats_seen: int = 0
+    channels_seen: int = 0
+    channels_with_text: int = 0
+    messages_in_window: int = 0
+    messages_outside_window: int = 0
+
+    @property
+    def looks_like_only_my_messages(self) -> bool:
+        """Telegram's bulk export restriction, as it appears in the data.
+
+        The account-wide export offers public channels as "only my messages",
+        and it cannot be unchecked — the content belongs to the channel owner.
+        In a broadcast channel you have posted nothing, so the chats arrive
+        present but empty. That is indistinguishable from a bad date range
+        unless you look at whether *any* channel had text at all.
+        """
+        return self.channels_seen > 0 and self.channels_with_text == 0
+
+
+def explain_empty(stats: "ExportStats", days: int) -> str:
+    """Say why an export yielded nothing, in terms of what to do about it."""
+    if stats.files == 0:
+        return "No result.json was found at that path."
+    if stats.chats_seen == 0:
+        return (
+            "The export contains no chats at all. Re-export with the channels "
+            "selected."
+        )
+    if stats.looks_like_only_my_messages:
+        return (
+            f"The export lists {stats.channels_seen} channel(s) but not one "
+            f"message of text.\n\n"
+            f"  This is Telegram's bulk-export restriction, not a problem with "
+            f"the file. In\n"
+            f"  Settings -> Advanced -> Export, public channels are fixed at "
+            f"\"only my messages\"\n"
+            f"  and cannot be unchecked, so a broadcast channel you only read "
+            f"exports empty.\n\n"
+            f"  Export each channel on its own instead: right-click it in the "
+            f"chat list ->\n"
+            f"  Export chat history -> format JSON, media off. That path has no "
+            f"such limit.\n"
+            f"  Put the resulting folders in one directory and point "
+            f"--from-export at it."
+        )
+    if stats.messages_in_window == 0 and stats.messages_outside_window > 0:
+        return (
+            f"All {stats.messages_outside_window} message(s) fall outside the "
+            f"last {days} days. Raise --days, or export a wider date range."
+        )
+    return (
+        f"No channel has messages inside {days} days. Check that the export "
+        f"included the channels and their message text."
+    )
+
+
 def read_export(
     path: str | Path,
     *,
     days: int = 30,
     channels_only: bool = True,
+    stats: Optional["ExportStats"] = None,
 ) -> List[ChannelHistory]:
-    """Build per-channel histories from an export, newest ``days`` only."""
+    """Build per-channel histories from an export, newest ``days`` only.
+
+    Pass ``stats`` to have the counts needed to explain an empty result filled
+    in; an export that parses fine and yields nothing is the common case, and
+    the reason is never visible from the empty list alone.
+    """
     cutoff_ms = (
         datetime.now(timezone.utc) - timedelta(days=days)
     ).timestamp() * 1000.0
 
+    st = stats if stats is not None else ExportStats()
+    st.files = len(find_export_files(path))
+
     by_id: Dict[int, ChannelHistory] = {}
     spans: Dict[int, List[float]] = {}
     for chat in iter_chats(path):
+        st.chats_seen += 1
         if channels_only and chat.get("type") not in (
             "public_channel", "private_channel", "channel"
         ):
             continue
+        st.channels_seen += 1
 
         chat_id = _chat_id(chat.get("id"))
         if chat_id is None:
@@ -193,7 +266,10 @@ def read_export(
                 continue                         # service entries carry no call
 
             posted_ms = _timestamp_ms(message)
-            if posted_ms is None or posted_ms < cutoff_ms:
+            if posted_ms is None:
+                continue
+            if posted_ms < cutoff_ms:
+                st.messages_outside_window += 1
                 continue
 
             message_id = int(message.get("id") or 0)
@@ -210,6 +286,7 @@ def read_export(
             text = flatten_text(message.get("text"))
             if not text:
                 continue
+            st.messages_in_window += 1
 
             seen_ids.add(message_id)
             history.messages.append(RawMessage(
@@ -234,6 +311,7 @@ def read_export(
             history.span_days = max((max(stamps) - min(stamps)) / 86_400_000.0, 0.0)
         if history.messages:
             history.messages.sort(key=lambda m: m.posted_wall_ms or 0.0)
+            st.channels_with_text += 1
             out.append(history)
 
     return out
