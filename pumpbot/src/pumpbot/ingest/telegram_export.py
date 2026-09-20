@@ -172,10 +172,19 @@ class ExportStats:
         The account-wide export offers public channels as "only my messages",
         and it cannot be unchecked — the content belongs to the channel owner.
         In a broadcast channel you have posted nothing, so the chats arrive
-        present but empty. That is indistinguishable from a bad date range
-        unless you look at whether *any* channel had text at all.
+        present but completely empty.
+
+        The absence of text *inside the window* is not enough to conclude
+        this: an export that is simply too old looks identical there, and
+        sending someone to redo twenty exports over a date range they could
+        have widened is the worse error. So this requires that no message
+        carried text at any date.
         """
-        return self.channels_seen > 0 and self.channels_with_text == 0
+        return (
+            self.channels_seen > 0
+            and self.channels_with_text == 0
+            and self.messages_outside_window == 0
+        )
 
 
 def explain_empty(stats: "ExportStats", days: int) -> str:
@@ -269,7 +278,10 @@ def read_export(
             if posted_ms is None:
                 continue
             if posted_ms < cutoff_ms:
-                st.messages_outside_window += 1
+                # Counted only when it carries text, so it distinguishes "too
+                # old" from "exported without content".
+                if flatten_text(message.get("text")):
+                    st.messages_outside_window += 1
                 continue
 
             message_id = int(message.get("id") or 0)
