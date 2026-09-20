@@ -56,11 +56,20 @@ pumpbot simulate --messages 2000
 
 That should print a report and `gate: 1/10 🔒 locked`. Needs Python 3.11+.
 
-Copy a config only when you want to change something:
+**No command needs a config file.** Secrets come from the environment, and
+everything else has a working default. Copy a template only to change
+something:
 
 ```bash
 cp config.example.yaml config.yaml            # or config.10usd.example.yaml
 ```
+
+A config in the working directory is picked up automatically — `config.yaml`
+first, then `config.10usd.yaml`, then any other `config*.yaml`. Templates
+(`*.example.yaml`) are never selected, since silently running one would hide
+that no real config exists. Every command prints which config is in force.
+Passing `-c` names a file explicitly, and a missing one is then an error
+rather than a silent fallback.
 
 Simulation needs nothing but `PyYAML`. Telethon, aiohttp, orjson and uvloop are
 only needed once you point it at real Telegram and a real venue.
@@ -352,7 +361,7 @@ tell you this strategy prints money. It does not.
 ## Tests
 
 ```bash
-pytest -q        # 185 tests
+pytest -q        # 189 tests
 ```
 
 Covering parser precision (including the false positives that would fire market
@@ -363,9 +372,10 @@ validation, determinism, and end-to-end report generation.
 ## Configuration
 
 Everything lives in `config.yaml` (gitignored; copy from `config.example.yaml`,
-which is commented throughout). Unknown keys are a hard error, not a shrug — a
-silently ignored typo in a risk limit is the kind of thing you find out about
-from your account balance.
+which is commented throughout) — or nowhere at all, since every setting has a
+working default and the file is optional. Unknown keys are a hard error, not a
+shrug: a silently ignored typo in a risk limit is the kind of thing you find
+out about from your account balance.
 
 ## Limitations, stated up front
 

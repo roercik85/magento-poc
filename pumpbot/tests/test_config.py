@@ -280,40 +280,83 @@ def test_default_ladder_is_not_shared_between_instances():
     assert b.strategy.take_profit_ladder
 
 
-def test_simulate_runs_without_a_config_file(tmp_path, capsys):
-    """README promises `pumpbot simulate` works with no setup at all."""
+def _args(config=None):
     import argparse
 
+    return argparse.Namespace(config=config)
+
+
+def test_runs_with_no_config_file_at_all(tmp_path, monkeypatch, capsys):
+    """No command requires a config file; secrets come from the environment."""
     from pumpbot.cli import _load
 
-    args = argparse.Namespace(config=str(tmp_path / "absent.yaml"), defaults_ok=True)
-    cfg = _load(args)
+    monkeypatch.chdir(tmp_path)
+    cfg = _load(_args())
     assert cfg.mode == "simulate"
     assert cfg.strategy.take_profit_ladder
     assert "built-in defaults" in capsys.readouterr().out
 
 
-def test_commands_that_need_a_config_still_demand_one(tmp_path):
-    import argparse
-
+def test_an_explicit_missing_config_is_an_error(tmp_path):
+    """-c is an explicit request, so papering over it would hide a typo."""
     from pumpbot.cli import _load
 
-    args = argparse.Namespace(config=str(tmp_path / "absent.yaml"), defaults_ok=False)
     with pytest.raises(SystemExit) as exc:
-        _load(args)
+        _load(_args(str(tmp_path / "absent.yaml")))
     assert exc.value.code == 2
 
 
-def test_env_credentials_still_apply_to_the_default_config(tmp_path, monkeypatch):
-    import argparse
-
+def test_config_yaml_is_picked_up_automatically(tmp_path, monkeypatch, capsys):
     from pumpbot.cli import _load
 
+    monkeypatch.chdir(tmp_path)
+    write(tmp_path, {"run_label": "found-me"})
+    cfg = _load(_args())
+    assert cfg.run_label == "found-me"
+    assert "config.yaml" in capsys.readouterr().out
+
+
+def test_the_ten_usd_config_is_found_when_config_yaml_is_absent(tmp_path, monkeypatch):
+    """Exactly the situation the setup instructions produce."""
+    from pumpbot.cli import _load
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.10usd.yaml").write_text(
+        yaml.safe_dump({"run_label": "ten-usd"}), encoding="utf-8")
+    assert _load(_args()).run_label == "ten-usd"
+
+
+def test_config_yaml_wins_over_other_candidates(tmp_path, monkeypatch):
+    from pumpbot.cli import _load
+
+    monkeypatch.chdir(tmp_path)
+    write(tmp_path, {"run_label": "primary"})
+    (tmp_path / "config.10usd.yaml").write_text(
+        yaml.safe_dump({"run_label": "secondary"}), encoding="utf-8")
+    assert _load(_args()).run_label == "primary"
+
+
+def test_example_templates_are_never_auto_selected(tmp_path, monkeypatch, capsys):
+    """Silently running a template would hide that no real config exists."""
+    from pumpbot.cli import _load
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.example.yaml").write_text(
+        yaml.safe_dump({"run_label": "template"}), encoding="utf-8")
+    (tmp_path / "config.10usd.example.yaml").write_text(
+        yaml.safe_dump({"run_label": "template"}), encoding="utf-8")
+    cfg = _load(_args())
+    assert cfg.run_label != "template"
+    assert "built-in defaults" in capsys.readouterr().out
+
+
+def test_env_credentials_apply_to_the_default_config(tmp_path, monkeypatch):
+    from pumpbot.cli import _load
+
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PUMPBOT_TG_API_ID", "4242")
     monkeypatch.setenv("PUMPBOT_TG_API_HASH", "h" * 32)
-    args = argparse.Namespace(config=str(tmp_path / "absent.yaml"), defaults_ok=True)
-    cfg = _load(args)
-    assert cfg.telegram.api_id == 4242
+    assert _load(_args()).telegram.api_id == 4242
 
 
 def test_session_directory_is_created(tmp_path, monkeypatch):

@@ -514,7 +514,8 @@ def cmd_triage(args: argparse.Namespace) -> int:
 
             if not targets:
                 print("error: no channels to triage. Join some, or list them in "
-                      f"telegram.channels in {args.config}.", file=sys.stderr)
+                      f"telegram.channels in {args.config or 'config.yaml'}.",
+                      file=sys.stderr)
                 return 1
 
             print(f"▸ reading {args.days}d of history from {len(targets)} channel(s)\n")
@@ -705,7 +706,8 @@ def _require_telegram(cfg: Config, config_path: str) -> None:
         f"       export {tg.api_id_env}=<the number>\n"
         f"       export {tg.api_hash_env}=<the 32-char hash>\n"
         f"\n"
-        f"  (Or set telegram.api_id / telegram.api_hash in {config_path},\n"
+        f"  (Or set telegram.api_id / telegram.api_hash in "
+        f"{config_path or 'config.yaml'},\n"
         f"   which is gitignored — but the environment is safer.)",
         file=sys.stderr,
     )
@@ -838,26 +840,67 @@ def cmd_fetch_prices(args: argparse.Namespace) -> int:
     return 0
 
 
+# Tried in order when -c was not given. Examples are never picked up: they are
+# templates, and silently running one would hide that no real config exists.
+_CONFIG_SEARCH = ("config.yaml", "config.10usd.yaml", "config.local.yaml")
+
+
+def find_config() -> Optional[Path]:
+    """The config this directory implies, or None to use built-in defaults."""
+    for name in _CONFIG_SEARCH:
+        path = Path(name)
+        if path.exists():
+            return path
+    others = sorted(
+        p for p in Path(".").glob("config*.yaml") if ".example." not in p.name
+    )
+    return others[0] if others else None
+
+
 def _load(args: argparse.Namespace) -> Config:
-    # Commands that need nothing but built-in defaults should not demand a
-    # config file. Requiring one to run a synthetic simulation is friction in
-    # front of the first thing anybody tries.
-    if getattr(args, "defaults_ok", False) and not Path(args.config).exists():
-        print(f"▸ no {args.config}; using built-in defaults "
-              f"(copy config.example.yaml to change anything)")
-        cfg = Config()
-        cfg.apply_env_overrides()
-        cfg.validate()
-        return cfg
+    """Resolve the config, in this order:
+
+    1. ``-c`` if it was given — an explicit request, so a missing file is an
+       error rather than something to paper over.
+    2. A config this directory implies (config.yaml, config.10usd.yaml, …).
+    3. Built-in defaults.
+
+    No command requires a config file. Secrets come from the environment, and
+    demanding a file for everything else just puts a wall in front of the first
+    thing anybody runs. Whatever is in force is printed, because a run that
+    silently picked up settings from somewhere unseen is its own kind of bug.
+    """
+    explicit = getattr(args, "config", None)
+    if explicit is not None:
+        path = Path(explicit)
+        if not path.exists():
+            print(f"config error: {explicit} not found.\n"
+                  f"  Omit -c to use built-in defaults, or copy a template:\n"
+                  f"    cp config.example.yaml {explicit}",
+                  file=sys.stderr)
+            raise SystemExit(2)
+    else:
+        path = find_config()
+        if path is None:
+            print("▸ config: built-in defaults "
+                  "(cp config.example.yaml config.yaml to change anything)")
+            cfg = Config()
+            cfg.apply_env_overrides()
+            cfg.validate()
+            return _announce_credentials(cfg, "built-in defaults")
+        print(f"▸ config: {path}")
 
     try:
-        cfg = load_config(args.config)
+        cfg = load_config(path)
     except ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
 
-    # Say where credentials came from. Silently picking them up from somewhere
-    # the operator cannot see is its own kind of bug.
+    return _announce_credentials(cfg, str(path))
+
+
+def _announce_credentials(cfg: Config, source: str) -> Config:
+    """Say where credentials came from, and nudge secrets out of files."""
     from_env = [
         name for name, value in (
             (cfg.telegram.api_id_env, os.environ.get(cfg.telegram.api_id_env)),
@@ -867,7 +910,7 @@ def _load(args: argparse.Namespace) -> Config:
     if from_env:
         print(f"▸ telegram credentials from environment: {', '.join(from_env)}")
     elif cfg.telegram.api_hash:
-        print(f"⚠ telegram api_hash is stored in {args.config}. Prefer "
+        print(f"⚠ telegram api_hash is stored in {source}. Prefer "
               f"{cfg.telegram.api_hash_env} in the environment — a config file "
               f"holding a secret is one commit away from being published.")
     return cfg
@@ -924,7 +967,9 @@ def build_parser() -> argparse.ArgumentParser:
         prog="pumpbot",
         description="Telegram pump-channel signal research and trading harness.",
     )
-    p.add_argument("-c", "--config", default="config.yaml", help="path to config.yaml")
+    p.add_argument("-c", "--config", default=None,
+                   help="config file (default: config.yaml or config.10usd.yaml "
+                        "in the working directory, else built-in defaults)")
     sub = p.add_subparsers(dest="command", required=True)
 
     def _common(sp: argparse.ArgumentParser) -> None:
@@ -944,7 +989,6 @@ def build_parser() -> argparse.ArgumentParser:
                      help="fraction of synthetic messages carrying a real call")
     sim.add_argument("--seed", type=int, default=0)
     sim.add_argument("--label", help="override run_label")
-    sim.set_defaults(defaults_ok=True)
     sim.add_argument("--use-scores", metavar="REPORT_JSON",
                      help="load channel scores from a previous run's report.json and "
                           "enforce risk.min_channel_score against them")
@@ -1017,7 +1061,7 @@ def build_parser() -> argparse.ArgumentParser:
     tr.set_defaults(func=cmd_triage)
 
     g = sub.add_parser("gate", help="show promotion-gate status")
-    g.set_defaults(func=cmd_gate, defaults_ok=True)
+    g.set_defaults(func=cmd_gate)
 
     lv = sub.add_parser("live", help="REAL ORDERS — gated")
     lv.add_argument("--i-accept-live-trading-risk", action="store_true",
