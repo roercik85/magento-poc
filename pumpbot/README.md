@@ -35,11 +35,26 @@ average while the typical call loses — and the report says so in those words.
 
 ## Install
 
+This project lives in the `pumpbot/` subdirectory of the repository, so that
+is where the install runs from — `pip install -e .` at the repository root
+fails with "neither 'setup.py' nor 'pyproject.toml' found".
+
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[live,dev]"      # drop [live] for simulation only
+git clone https://github.com/roercik85/magento-poc.git
+cd magento-poc/pumpbot          # <- the project root, not the repo root
+
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[live,dev]"    # drop [live] for simulation only
 cp config.example.yaml config.yaml
 ```
+
+Verify before going near Telegram:
+
+```bash
+pumpbot simulate --messages 2000
+```
+
+That should print a report and `gate: 1/10 🔒 locked`. Needs Python 3.11+.
 
 Simulation needs nothing but `PyYAML`. Telethon, aiohttp, orjson and uvloop are
 only needed once you point it at real Telegram and a real venue.
