@@ -124,9 +124,24 @@ class LadderRung:
     fraction: float
 
 
+def _default_ladder() -> List["LadderRung"]:
+    """Scale out into strength rather than guessing the top.
+
+    The defaults have to be a working strategy, not an empty shell: with no
+    ladder the trailing stop never arms (it arms on the first rung), so a
+    default-configured run silently degrades to stop-loss and time-exit only
+    and quietly measures something other than what is documented.
+    """
+    return [
+        LadderRung(gain_pct=4.0, fraction=0.40),
+        LadderRung(gain_pct=9.0, fraction=0.35),
+        LadderRung(gain_pct=20.0, fraction=0.25),
+    ]
+
+
 @dataclass
 class StrategyConfig:
-    take_profit_ladder: List[LadderRung] = field(default_factory=list)
+    take_profit_ladder: List[LadderRung] = field(default_factory=_default_ladder)
     stop_loss_pct: float = 6.0
     trailing_stop_pct: float = 5.0
     max_hold_s: int = 180

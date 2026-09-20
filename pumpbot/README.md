@@ -45,16 +45,22 @@ cd magento-poc/pumpbot          # <- the project root, not the repo root
 
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[live,dev]"    # drop [live] for simulation only
-cp config.example.yaml config.yaml
 ```
 
-Verify before going near Telegram:
+Verify before going near Telegram — this needs no config file, no
+credentials and no network:
 
 ```bash
 pumpbot simulate --messages 2000
 ```
 
 That should print a report and `gate: 1/10 🔒 locked`. Needs Python 3.11+.
+
+Copy a config only when you want to change something:
+
+```bash
+cp config.example.yaml config.yaml            # or config.10usd.example.yaml
+```
 
 Simulation needs nothing but `PyYAML`. Telethon, aiohttp, orjson and uvloop are
 only needed once you point it at real Telegram and a real venue.
@@ -346,7 +352,7 @@ tell you this strategy prints money. It does not.
 ## Tests
 
 ```bash
-pytest -q        # 174 tests
+pytest -q        # 179 tests
 ```
 
 Covering parser precision (including the false positives that would fire market

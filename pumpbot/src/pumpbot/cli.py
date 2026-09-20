@@ -690,6 +690,17 @@ def cmd_fetch_prices(args: argparse.Namespace) -> int:
 
 
 def _load(args: argparse.Namespace) -> Config:
+    # Commands that need nothing but built-in defaults should not demand a
+    # config file. Requiring one to run a synthetic simulation is friction in
+    # front of the first thing anybody tries.
+    if getattr(args, "defaults_ok", False) and not Path(args.config).exists():
+        print(f"▸ no {args.config}; using built-in defaults "
+              f"(copy config.example.yaml to change anything)")
+        cfg = Config()
+        cfg.apply_env_overrides()
+        cfg.validate()
+        return cfg
+
     try:
         cfg = load_config(args.config)
     except ConfigError as exc:
@@ -784,6 +795,7 @@ def build_parser() -> argparse.ArgumentParser:
                      help="fraction of synthetic messages carrying a real call")
     sim.add_argument("--seed", type=int, default=0)
     sim.add_argument("--label", help="override run_label")
+    sim.set_defaults(defaults_ok=True)
     sim.add_argument("--use-scores", metavar="REPORT_JSON",
                      help="load channel scores from a previous run's report.json and "
                           "enforce risk.min_channel_score against them")
@@ -848,7 +860,7 @@ def build_parser() -> argparse.ArgumentParser:
     tr.set_defaults(func=cmd_triage)
 
     g = sub.add_parser("gate", help="show promotion-gate status")
-    g.set_defaults(func=cmd_gate)
+    g.set_defaults(func=cmd_gate, defaults_ok=True)
 
     lv = sub.add_parser("live", help="REAL ORDERS — gated")
     lv.add_argument("--i-accept-live-trading-risk", action="store_true",

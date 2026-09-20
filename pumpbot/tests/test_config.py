@@ -252,3 +252,65 @@ def test_guard_names_only_what_is_missing(capsys):
     err = capsys.readouterr().err
     assert "api_hash not set" in err
     assert "api_id and" not in err
+
+
+# --- defaults must stand on their own --------------------------------------
+def test_default_config_is_a_working_strategy():
+    """An empty ladder would silently disable the trailing stop, which only
+    arms on the first rung — so a default run would measure something other
+    than what the docs describe."""
+    from pumpbot.config import Config
+
+    cfg = Config()
+    cfg.validate()
+    assert cfg.strategy.take_profit_ladder, "defaults ship no take-profit ladder"
+    fractions = sum(r.fraction for r in cfg.strategy.take_profit_ladder)
+    assert fractions == pytest.approx(1.0)
+    gains = [r.gain_pct for r in cfg.strategy.take_profit_ladder]
+    assert gains == sorted(gains)
+
+
+def test_default_ladder_is_not_shared_between_instances():
+    """A mutable default leaking across configs would make one run's tuning
+    silently affect the next."""
+    from pumpbot.config import Config
+
+    a, b = Config(), Config()
+    a.strategy.take_profit_ladder.clear()
+    assert b.strategy.take_profit_ladder
+
+
+def test_simulate_runs_without_a_config_file(tmp_path, capsys):
+    """README promises `pumpbot simulate` works with no setup at all."""
+    import argparse
+
+    from pumpbot.cli import _load
+
+    args = argparse.Namespace(config=str(tmp_path / "absent.yaml"), defaults_ok=True)
+    cfg = _load(args)
+    assert cfg.mode == "simulate"
+    assert cfg.strategy.take_profit_ladder
+    assert "built-in defaults" in capsys.readouterr().out
+
+
+def test_commands_that_need_a_config_still_demand_one(tmp_path):
+    import argparse
+
+    from pumpbot.cli import _load
+
+    args = argparse.Namespace(config=str(tmp_path / "absent.yaml"), defaults_ok=False)
+    with pytest.raises(SystemExit) as exc:
+        _load(args)
+    assert exc.value.code == 2
+
+
+def test_env_credentials_still_apply_to_the_default_config(tmp_path, monkeypatch):
+    import argparse
+
+    from pumpbot.cli import _load
+
+    monkeypatch.setenv("PUMPBOT_TG_API_ID", "4242")
+    monkeypatch.setenv("PUMPBOT_TG_API_HASH", "h" * 32)
+    args = argparse.Namespace(config=str(tmp_path / "absent.yaml"), defaults_ok=True)
+    cfg = _load(args)
+    assert cfg.telegram.api_id == 4242
