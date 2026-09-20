@@ -314,3 +314,34 @@ def test_env_credentials_still_apply_to_the_default_config(tmp_path, monkeypatch
     args = argparse.Namespace(config=str(tmp_path / "absent.yaml"), defaults_ok=True)
     cfg = _load(args)
     assert cfg.telegram.api_id == 4242
+
+
+def test_session_directory_is_created(tmp_path, monkeypatch):
+    """state/ is gitignored, so it is absent from every fresh clone. Telethon
+    opens the session in SQLite inside its constructor, and a missing
+    directory fails with 'unable to open database file' — which reads like a
+    Telegram problem and is not one."""
+    from pumpbot.ingest.telegram import prepare_session_path
+
+    monkeypatch.chdir(tmp_path)
+    assert not (tmp_path / "state").exists()
+    returned = prepare_session_path("state/pumpbot")
+    assert returned == "state/pumpbot"
+    assert (tmp_path / "state").is_dir()
+
+
+def test_session_path_without_a_directory_is_left_alone(tmp_path, monkeypatch):
+    from pumpbot.ingest.telegram import prepare_session_path
+
+    monkeypatch.chdir(tmp_path)
+    assert prepare_session_path("pumpbot") == "pumpbot"
+
+
+def test_preparing_an_existing_session_directory_is_idempotent(tmp_path, monkeypatch):
+    from pumpbot.ingest.telegram import prepare_session_path
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "state").mkdir()
+    prepare_session_path("state/pumpbot")
+    prepare_session_path("state/pumpbot")
+    assert (tmp_path / "state").is_dir()

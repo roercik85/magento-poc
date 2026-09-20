@@ -262,10 +262,13 @@ def cmd_discover(args: argparse.Namespace) -> int:
     async def _go() -> int:
         from telethon import TelegramClient
 
+        from .ingest.telegram import prepare_session_path
         from .scoring.discovery import discover
 
         client = TelegramClient(
-            cfg.telegram.session_name, cfg.telegram.api_id, cfg.telegram.api_hash
+            prepare_session_path(cfg.telegram.session_name),
+            cfg.telegram.api_id,
+            cfg.telegram.api_hash,
         )
         await client.start()
         try:
@@ -334,6 +337,7 @@ def cmd_triage(args: argparse.Namespace) -> int:
         from telethon import TelegramClient
 
         from .ingest.history import read_history, screen, summarise
+        from .ingest.telegram import prepare_session_path
         from .marketdata.historical import HistoricalFeed
         from .marketdata.kucoin import KucoinSymbols, fetch_klines
         from .parsing.extractor import SignalExtractor
@@ -346,7 +350,9 @@ def cmd_triage(args: argparse.Namespace) -> int:
         )
 
         client = TelegramClient(
-            cfg.telegram.session_name, cfg.telegram.api_id, cfg.telegram.api_hash
+            prepare_session_path(cfg.telegram.session_name),
+            cfg.telegram.api_id,
+            cfg.telegram.api_hash,
         )
         await client.start()
 

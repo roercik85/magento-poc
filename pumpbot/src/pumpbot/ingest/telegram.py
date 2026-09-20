@@ -31,6 +31,23 @@ from ..models import RawMessage
 MessageHandler = Callable[[RawMessage], Awaitable[None] | None]
 
 
+def prepare_session_path(session_name: str) -> str:
+    """Make sure the session file's directory exists.
+
+    Telethon stores the session in SQLite and opens it in the TelegramClient
+    constructor, so a missing directory fails with "unable to open database
+    file" before any Telegram code runs — which reads like a Telegram problem
+    and is not one. The default lives under state/, which is gitignored and
+    therefore absent from every fresh clone.
+    """
+    from pathlib import Path
+
+    path = Path(session_name)
+    if path.parent != Path("."):
+        path.parent.mkdir(parents=True, exist_ok=True)
+    return session_name
+
+
 class TelegramIngest:
     """Fans raw channel messages into a single handler, deduplicated."""
 
@@ -75,7 +92,9 @@ class TelegramIngest:
                 raise RuntimeError(
                     f"telegram session {session_name!r} is missing api_id/api_hash"
                 )
-            client = TelegramClient(session_name, api_id, api_hash)
+            client = TelegramClient(
+                prepare_session_path(session_name), api_id, api_hash
+            )
             client.add_event_handler(
                 self._make_raw_handler(session_name), events.Raw
             )
