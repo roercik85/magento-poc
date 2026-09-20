@@ -436,3 +436,34 @@ def test_inspect_confidence_override_changes_what_parses(tmp_path, capsys, now):
 def test_inspect_reports_an_unreadable_export(tmp_path, capsys):
     code, _ = run_inspect(tmp_path, capsys, from_export=str(tmp_path / "nope"))
     assert code == 1
+
+
+def test_per_chat_and_account_exports_side_by_side(tmp_path, now):
+    """The real layout: several per-chat exports and an account export in one
+    downloads folder. The account export repeats a channel the per-chat one
+    already covered."""
+    single_chat_export(tmp_path / "ChatExport_2026-09-20", "alpha", 111, [
+        msg(i, now - (10 - i) * 86400, f"BUY $AAA{i}X NOW") for i in range(5)
+    ])
+    single_chat_export(tmp_path / "ChatExport_2026-09-20 (1)", "beta", 222, [
+        msg(i, now - (10 - i) * 86400, f"BUY $BBB{i}X NOW") for i in range(5)
+    ])
+    (tmp_path / "DataExport_2026-09-20").mkdir()
+    (tmp_path / "DataExport_2026-09-20" / "result.json").write_text(json.dumps({
+        "chats": {"list": [
+            # Overlaps the per-chat export, plus messages it did not contain.
+            chat("alpha", 111, [
+                msg(i, now - (10 - i) * 86400, f"BUY $AAA{i}X NOW")
+                for i in range(5)
+            ] + [msg(90, now - 86400, "BUY $LATERX NOW")]),
+            chat("empty public", 999, []),      # the export restriction
+        ]},
+    }), encoding="utf-8")
+
+    histories = {h.name: h for h in read_export(tmp_path, days=30)}
+    assert set(histories) == {"alpha", "beta"}
+
+    ids = [m.message_id for m in histories["alpha"].messages]
+    assert len(ids) == len(set(ids)), "overlapping messages were duplicated"
+    assert 90 in ids, "messages only in the account export were lost"
+    assert len(ids) == 6
