@@ -226,17 +226,26 @@ With several channels, `--brief` drops the per-token detail and prints a
 ranking by how much of each channel's output survives to a fill:
 
 ```
-  channel                       calls  w/ addr  tradable  usable  note
-  Addr Callers                      3     100%         3       3  worth recording live
-  Mixed                             3      33%         1       1  33% usable
-  Ticker Only                       3       0%         1       0  routes, but none clears thresholds
+  channel                    calls  w/addr  named  routes  usable  where they die
+  Fortune AI Official           26      0%     10      10       5  19% reach a fill
+  Crypto Gem Signals            35     66%     23       4       1  3% reach a fill
+  Wall Street Gems               6      0%      0       0       0  never identified
 ```
 
-The `w/ addr` column is the quality signal that matters on a DEX and has no
-equivalent on an exchange: **a channel that posts contract addresses is
-tradable by construction, and one that posts bare tickers mostly is not.** A
-ticker can name a dozen different mints, and this refuses to guess between
-them.
+A call dies in one of two quite different places, and a single count hides
+which. `named` is how many were identified at all — a bare ticker can name a
+dozen mints and this refuses to guess between them. `routes` is how many of
+those had a market. The first failure is fixable by choosing channels that
+post contract addresses; the second is not fixable at all.
+
+> Measured over fifteen real channels: posting addresses is **necessary but
+> not sufficient**. The channel above posts an address with 66% of its calls,
+> and reaches a fill on 3% of them — the addresses resolve perfectly and name
+> tokens with no market.
+
+The footer converts the observed rate into the months of collecting needed
+before a result is distinguishable from luck. A usable-call count reads as
+progress; that conversion usually says something else.
 
 ### 4. `fetch-prices` — get the prices to judge against *(Binance only)*
 
@@ -456,7 +465,7 @@ tell you this strategy prints money. It does not.
 ## Tests
 
 ```bash
-pytest -q        # 302 tests
+pytest -q        # 306 tests
 ```
 
 Covering parser precision (including the false positives that would fire market

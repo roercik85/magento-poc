@@ -286,9 +286,12 @@ def test_the_sell_is_quoted_for_the_full_position():
 # --------------------------------------------------------------------------
 # cross-channel ranking
 # --------------------------------------------------------------------------
-def row(name, *, calls=10, with_address=0, checked=10, tradable=0, safe=0):
+def row(name, *, calls=10, with_address=0, checked=10, resolved=None,
+        tradable=0, safe=0):
     return {"name": name, "calls": calls, "with_address": with_address,
-            "checked": checked, "tradable": tradable, "safe": safe}
+            "checked": checked,
+            "resolved": tradable if resolved is None else resolved,
+            "tradable": tradable, "safe": safe}
 
 
 def rank(rows, capsys, notional=10.0):
@@ -311,36 +314,40 @@ def test_channels_are_ordered_by_what_survives_to_a_fill(capsys):
     ], capsys)
     positions = [out.index(n) for n in ("best", "mediocre", "dead")]
     assert positions == sorted(positions)
-    assert "Start with best" in out
+    assert "Best: best" in out
 
 
-def test_a_channel_that_routes_nothing_says_execution_cannot_help(capsys):
-    out = rank([row("dead", tradable=0, safe=0), row("other", tradable=1, safe=1)],
-               capsys)
-    assert "nothing routes — execution cannot help" in out
+def test_calls_that_are_never_identified_are_distinguished(capsys):
+    """A bare ticker naming a dozen mints fails at a different place than a
+    token that is identified perfectly and has no market."""
+    out = rank([
+        row("tickers", calls=10, resolved=0, tradable=0, safe=0),
+        row("ok", tradable=6, safe=6),
+    ], capsys)
+    assert "never identified" in out
+
+
+def test_identified_but_unroutable_is_its_own_note(capsys):
+    """The case the data showed: a channel posting addresses whose tokens are
+    dead. Identification succeeded; there is simply no market."""
+    out = rank([
+        row("dead tokens", calls=10, with_address=9, resolved=9, tradable=0, safe=0),
+        row("ok", tradable=6, safe=6),
+    ], capsys)
+    assert "identified, but nothing routes" in out
+    assert "never identified" not in out
 
 
 def test_routing_without_clearing_thresholds_is_distinguished(capsys):
-    out = rank([row("thin", tradable=6, safe=0), row("ok", tradable=6, safe=6)],
-               capsys)
-    assert "routes, but none clears the thresholds" in out
+    out = rank([row("thin", resolved=6, tradable=6, safe=0),
+                row("ok", tradable=6, safe=6)], capsys)
+    assert "routes, below every threshold" in out
 
 
 def test_all_dead_says_so_plainly(capsys):
     out = rank([row("a", tradable=0, safe=0), row("b", tradable=2, safe=0)], capsys)
     assert "Nothing here is tradable" in out
     assert "no amount of execution" in out
-
-
-def test_address_posting_channels_are_called_out(capsys):
-    """The DEX-specific quality signal: a bare ticker can name a dozen mints,
-    so a channel that posts addresses is tradable by construction."""
-    out = rank([
-        row("addresses", calls=10, with_address=9, tradable=9, safe=8),
-        row("tickers", calls=10, with_address=0, tradable=1, safe=0),
-    ], capsys)
-    assert "1 channel(s) post contract addresses" in out
-    assert "100%" not in out.split("RANKING")[0]        # no stray percentages
 
 
 def test_address_share_is_reported_per_channel(capsys):
@@ -351,7 +358,47 @@ def test_address_share_is_reported_per_channel(capsys):
     assert "50%" in out
 
 
+def test_posting_addresses_is_not_claimed_to_make_a_channel_tradable(capsys):
+    """Refuted by real data: a channel posting addresses for 66% of its calls
+    reached a fill on 3% of them. An address removes ambiguity; it says
+    nothing about whether the token has a market."""
+    out = rank([
+        row("addresses", calls=35, with_address=23, resolved=23, tradable=4, safe=1),
+        row("other", tradable=2, safe=2),
+    ], capsys)
+    assert "by construction" not in out
+    assert "identified, but nothing routes" not in out    # 4 did route
+    assert "3% reach a fill" in out
+
+
 def test_a_channel_with_no_calls_does_not_divide_by_zero(capsys):
     out = rank([row("silent", calls=0, checked=0), row("other", tradable=1, safe=1)],
                capsys)
     assert "no calls" in out
+
+
+# --- turning a call rate into time ----------------------------------------
+def test_the_rate_is_converted_into_months_of_collecting(capsys):
+    """A usable-call count reads as progress; the months it implies usually
+    say something else."""
+    out = rank([row("a", calls=26, tradable=10, safe=5),
+                row("b", calls=6, tradable=2, safe=1)], capsys)
+    assert "6 usable call(s) in 30 days" in out
+    assert "0.20 a day" in out
+    assert "month(s) at this rate" in out
+    assert "Adding channels is the only lever" in out
+
+
+def test_no_usable_calls_means_no_rate_projection(capsys):
+    out = rank([row("a", tradable=1, safe=0), row("b", tradable=0, safe=0)], capsys)
+    assert "month(s) at this rate" not in out
+
+
+def test_a_higher_edge_needs_fewer_trades(capsys):
+    import re
+
+    out = rank([row("a", calls=100, tradable=60, safe=60),
+                row("b", tradable=1, safe=1)], capsys)
+    needed = [int(n.replace(",", ""))
+              for n in re.findall(r"needs ([\d,]+) trades", out)]
+    assert needed == sorted(needed)          # 3% edge first, then 2%, then 1%

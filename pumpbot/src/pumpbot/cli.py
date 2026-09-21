@@ -957,7 +957,7 @@ def cmd_solana_check(args: argparse.Namespace) -> int:
                           f"{'tx24':>6} {'round-trip':>11}  verdict")
                     print("  " + "-" * 100)
 
-                tradable = safe = 0
+                resolved = tradable = safe = 0
                 for key, (base, contract, example) in list(calls.items())[:args.limit]:
                     resolution = await tokens.resolve(
                         contract=contract if contract else None,
@@ -971,6 +971,7 @@ def cmd_solana_check(args: argparse.Namespace) -> int:
                                   f"{'':>11}  {resolution.reason[:44]}")
                         continue
 
+                    resolved += 1
                     pair = resolution.best
                     verdict = await checker.check(
                         resolution.mint, symbol=label,
@@ -1000,7 +1001,7 @@ def cmd_solana_check(args: argparse.Namespace) -> int:
                 ranking.append({
                     "name": history.name, "calls": len(calls),
                     "with_address": with_address, "checked": checked,
-                    "tradable": tradable, "safe": safe,
+                    "resolved": resolved, "tradable": tradable, "safe": safe,
                 })
                 if not args.brief:
                     print(f"\n  {tradable}/{checked} tradable, {safe}/{checked} pass "
@@ -1015,11 +1016,13 @@ def cmd_solana_check(args: argparse.Namespace) -> int:
 
 
 def _print_solana_ranking(rows: List[Dict[str, Any]], notional: float) -> None:
-    """Rank channels by what actually survives to a fill.
+    """Rank channels by what survives to a fill, and say where the rest died.
 
-    With one channel the per-token detail is the output. With twenty it is
-    noise, and the decision-relevant number is how much of each channel's
-    output can be traded at all.
+    A call can fail in two quite different places, and a single "usable" count
+    hides which: it may never be identified (a bare ticker naming a dozen
+    mints), or it may be identified perfectly and have nothing on the other
+    side. The first is fixable by choosing channels that post addresses; the
+    second is not fixable at all.
     """
     if len(rows) < 2:
         return
@@ -1028,44 +1031,71 @@ def _print_solana_ranking(rows: List[Dict[str, Any]], notional: float) -> None:
     print("\n" + "=" * 104)
     print(f"RANKING — {len(rows)} channel(s), quotes taken at ${notional:.0f}")
     print("=" * 104)
-    print(f"  {'channel':<40} {'calls':>6} {'w/ addr':>8} {'tradable':>9} "
-          f"{'usable':>7}  note")
+    print(f"  {'channel':<38} {'calls':>6} {'w/addr':>7} {'named':>6} "
+          f"{'routes':>7} {'usable':>7}  where they die")
     print("  " + "-" * 100)
 
     for r in rows:
-        checked = r["checked"] or 1
-        addr_pct = 100.0 * r["with_address"] / (r["calls"] or 1)
-        if r["calls"] == 0:
+        calls = r["calls"] or 0
+        resolved = r.get("resolved", 0)
+        addr_pct = 100.0 * r["with_address"] / (calls or 1)
+        if calls == 0:
             note = "no calls"
+        elif resolved == 0:
+            note = "never identified — tickers name many mints"
         elif r["tradable"] == 0:
-            note = "nothing routes — execution cannot help"
+            note = "identified, but nothing routes"
         elif r["safe"] == 0:
-            note = "routes, but none clears the thresholds"
-        elif r["safe"] / checked >= 0.5:
-            note = "worth recording live"
+            note = "routes, below every threshold"
         else:
-            note = f"{100.0 * r['safe'] / checked:.0f}% usable"
-        print(f"  {r['name'][:40]:<40} {r['calls']:>6} {addr_pct:>7.0f}% "
-              f"{r['tradable']:>9} {r['safe']:>7}  {note}")
+            note = f"{100.0 * r['safe'] / calls:.0f}% reach a fill"
+        print(f"  {r['name'][:38]:<38} {calls:>6} {addr_pct:>6.0f}% {resolved:>6} "
+              f"{r['tradable']:>7} {r['safe']:>7}  {note}")
 
     best = rows[0]
     print()
     if best["safe"] == 0:
         print("  Nothing here is tradable. That is a result: these channels call "
-              "tokens\n  that cannot be bought and sold at your size, and no "
-              "amount of execution\n  work changes what is on the other side.")
-    else:
-        print(f"  Start with {best['name']}: {best['safe']} of {best['checked']} "
-              f"calls survive to a fill.")
+              "tokens that\n  cannot be bought and sold at your size, and no "
+              "amount of execution work\n  changes what is on the other side.")
+        print()
+        return
 
-    # The DEX-specific quality signal, worth stating because it is actionable.
-    addressed = [r for r in rows if r["calls"] and r["with_address"] / r["calls"] > 0.5]
-    if addressed:
-        print(f"\n  {len(addressed)} channel(s) post contract addresses with most "
-              f"calls. Those are the\n  tradable ones by construction: a bare "
-              f"ticker can name a dozen different mints,\n  and this refuses to "
-              f"guess between them.")
+    print(f"  Best: {best['name']} — {best['safe']} of {best['calls']} calls "
+          f"reach a fill.")
+    _print_rate_reality(rows)
     print()
+
+
+# Per-trade dispersion for these trades, from the simulated runs. Used only to
+# turn a call rate into the time it would take to learn anything.
+_TRADE_SIGMA_PCT = 7.0
+
+
+def _print_rate_reality(rows: List[Dict[str, Any]], *, window_days: int = 30) -> None:
+    """Say how long the best channel's rate takes to become evidence.
+
+    A usable-call count is easy to read as progress. Converted into the months
+    needed before the result is distinguishable from luck, it usually says
+    something else, and that conversion is the point of measuring at all.
+    """
+    import math
+
+    usable = sum(r["safe"] for r in rows)
+    if usable == 0:
+        return
+
+    per_day = usable / window_days
+    print(f"\n  Across every channel: {usable} usable call(s) in {window_days} days "
+          f"— {per_day:.2f} a day.")
+
+    for edge in (3.0, 2.0, 1.0):
+        needed = math.ceil((2 * _TRADE_SIGMA_PCT / edge) ** 2)
+        months = needed / per_day / 30.0
+        print(f"    a {edge:.0f}% per-trade edge needs {needed:,} trades "
+              f"— {months:.0f} month(s) at this rate")
+    print("  Those are months of collecting, before knowing whether the edge is "
+          "real.\n  Adding channels is the only lever that shortens it.")
 
 
 def cmd_gate(args: argparse.Namespace) -> int:
