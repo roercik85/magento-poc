@@ -243,3 +243,44 @@ def test_lowercase_hashtag_does_not_leak_through_uppercasing(ex):
     """The text is upper-cased for most patterns, which would turn #base into
     #BASE and admit it. The hashtag pattern has to read the original."""
     assert ex.extract(msg("#base is heating up now 🚀")) is None
+
+
+# --- a call can name both a ticker and an address --------------------------
+def test_a_ticker_call_also_carries_its_contract():
+    """"Aped $BACKD on sol  Ca: 2pPPGo…" — on a DEX the address is the
+    instrument and the ticker is a claim, so both have to survive."""
+    ex = SignalExtractor(quote_assets=["USDT"], accept_contracts=True,
+                         min_confidence=0.55)
+    sig = ex.extract(msg(
+        "Aped $BACKD on sol Launchpad +perps Ca: "
+        "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
+    ))
+    assert sig is not None
+    assert sig.base == "BACKD"
+    assert sig.symbol == "BACKDUSDT"
+    assert sig.contract == "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
+    assert sig.chain == "solana"
+
+
+def test_contracts_are_not_attached_when_disabled():
+    ex = SignalExtractor(quote_assets=["USDT"], accept_contracts=False,
+                         min_confidence=0.55)
+    sig = ex.extract(msg("Aped $BACKD 0x" + "a" * 40))
+    assert sig is not None
+    assert sig.contract is None
+
+
+def test_a_ticker_call_without_an_address_has_none(ex):
+    sig = ex.extract(msg("BUY $PEPE NOW 🚀"))
+    assert sig is not None
+    assert sig.contract is None
+
+
+def test_find_contracts_is_usable_on_its_own():
+    """For messages that name an address and no ticker at all."""
+    ex = SignalExtractor(quote_assets=["USDT"], accept_contracts=True)
+    address, chain = ex.find_contracts(
+        "new one EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm ape now"
+    )
+    assert address == "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm"
+    assert chain == "solana"

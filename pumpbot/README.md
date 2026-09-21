@@ -192,6 +192,36 @@ same pattern.
 `--min-confidence` overrides the threshold for one run, so you can see what a
 looser setting would admit before changing anything.
 
+### 3c. `solana-check` — are the calls tradable on chain at all?
+
+```bash
+pumpbot solana-check --from-export PATH --channel "gem signals" --notional 10
+```
+
+On a centralised venue the ticker *is* the instrument. On a DEX it is a claim:
+anyone can mint a token with any name, and measured against the live chain
+while this was built, fourteen distinct mints call themselves HEDGE, seven call
+themselves EVE, and DexScreener's top result for "BONK" is a mint with $249M of
+claimed liquidity, $3.99 of daily volume and two trades in a day.
+
+So resolution is contract-first. An address in the message names the token; a
+bare ticker resolves only when exactly one candidate shows real trading
+activity, and two plausible candidates is reported as ambiguous rather than
+guessed.
+
+Each resolved token is then **bought and sold back in quotes**. That one
+measurement catches, at the position's real size:
+
+| What it catches | How |
+|---|---|
+| Not tradable | No buy route exists |
+| **Honeypot** | Buys route, the sell does not — invisible in liquidity and holder counts |
+| Transfer tax | The round trip loses far more than fees |
+| Dead depth | Your own order is the market |
+
+Run this before building anything on top of a channel. If nothing routes, no
+amount of execution work helps: there is nothing on the other side.
+
 ### 4. `fetch-prices` — get the prices to judge against *(Binance only)*
 
 ```bash
@@ -385,7 +415,8 @@ risk/manager.py       cooldowns, concurrency, drawdown halt, channel filter
 strategy/pump.py      entry chase guard; stop / trailing / ladder / time exits
    ↓
 execution/            simulator.py | live_binance.py | live_kucoin.py
-marketdata/           feed.py (synthetic) | historical.py | kucoin.py (ticks)
+marketdata/           feed.py (synthetic) | historical.py | kucoin.py | solana.py
+risk/token_safety.py  round-trip quote: honeypot, tax and depth in one check
    ↓
 scoring/channels.py   hit rate, net median, originator, pre-post run
    ↓
@@ -409,7 +440,7 @@ tell you this strategy prints money. It does not.
 ## Tests
 
 ```bash
-pytest -q        # 256 tests
+pytest -q        # 293 tests
 ```
 
 Covering parser precision (including the false positives that would fire market

@@ -175,13 +175,20 @@ class SignalExtractor:
         if confidence < self._min_conf:
             return None
 
+        # A message often carries both — "Aped $BACKD on sol  Ca: 2pPPGo…".
+        # On a DEX the address is the instrument and the ticker is a claim, so
+        # keep both and let the router prefer the address.
+        contract, chain = (
+            self._find_contract(text) if self._accept_contracts else (None, None)
+        )
+
         return Signal.new(
             raw,
             kind=SignalKind.SYMBOL,
             symbol=self._as_pair(base),
             base=base,
-            contract=None,
-            chain=None,
+            contract=contract,
+            chain=chain,
             confidence=confidence,
             matched_by=matched_by,
             target_pcts=targets,
@@ -253,6 +260,10 @@ class SignalExtractor:
         if token.isdigit():
             return False
         return True
+
+    def find_contracts(self, text: str) -> Tuple[Optional[str], Optional[str]]:
+        """Public: the first contract address in ``text``, and its chain."""
+        return self._find_contract(text)
 
     def _find_contract(self, text: str) -> Tuple[Optional[str], Optional[str]]:
         m = _RE_EVM.search(text)

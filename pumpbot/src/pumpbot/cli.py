@@ -856,6 +856,144 @@ def _print_parse_summary(history, extractor, listed, limit: int) -> None:  # noq
           f"{tradable} tradable here\n")
 
 
+def cmd_solana_check(args: argparse.Namespace) -> int:
+    """Ask whether a channel's calls are tradable on Solana at all.
+
+    This runs before any execution is built, because the answer decides
+    whether building it is worth doing. For each call it resolves the token —
+    preferring a contract address in the message over the ticker, since the
+    ticker is a claim and the address is the instrument — then quotes buying
+    the position and selling it straight back.
+    """
+    import asyncio
+
+    cfg = _load(args)
+
+    async def _go() -> int:
+        import aiohttp
+
+        from .ingest.telegram_export import (
+            ExportError,
+            ExportStats,
+            explain_empty,
+            read_export,
+        )
+        from .marketdata.solana import SolanaTokens
+        from .parsing.extractor import SignalExtractor
+        from .risk.token_safety import SafetyLimits, TokenSafetyChecker
+
+        extractor = SignalExtractor(
+            ignore_symbols=cfg.parsing.ignore_symbols,
+            quote_assets=cfg.parsing.quote_assets,
+            accept_contracts=True,               # the whole point here
+            min_confidence=cfg.parsing.min_confidence,
+        )
+
+        stats = ExportStats()
+        try:
+            histories = read_export(args.from_export, days=args.days, stats=stats)
+        except ExportError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if not histories:
+            print(f"error: {explain_empty(stats, args.days)}", file=sys.stderr)
+            return 1
+        if args.channel:
+            needle = args.channel.lower()
+            histories = [h for h in histories if needle in h.name.lower()]
+            if not histories:
+                print(f"error: no channel matching {args.channel!r}", file=sys.stderr)
+                return 1
+
+        limits = SafetyLimits(
+            min_liquidity_usd=args.min_liquidity,
+            min_volume_h24=args.min_volume,
+            min_txns_h24=args.min_txns,
+        )
+
+        async with aiohttp.ClientSession() as session:
+            tokens = SolanaTokens(session)
+            checker = TokenSafetyChecker(session)
+
+            for history in histories:
+                # One entry per distinct token, newest call wins. A channel
+                # mentioning the same token nine times is one decision.
+                calls: Dict[str, Tuple[str, Optional[str], str]] = {}
+                for m in history.messages:
+                    sig = extractor.extract(m)
+                    if sig is None:
+                        contract, chain = extractor.find_contracts(m.text)
+                        if not contract or chain != "solana":
+                            continue
+                        key, base = contract, ""
+                    else:
+                        key = sig.contract or sig.symbol or ""
+                        base = (sig.base or "").upper()
+                    if not key:
+                        continue
+                    calls[key] = (base, sig.contract if sig else key,
+                                  " ".join(m.text.split())[:52])
+
+                print("=" * 104)
+                print(f"{history.name}  —  {len(calls)} distinct token(s) called")
+                print("=" * 104)
+                if not calls:
+                    print("  nothing to check\n")
+                    continue
+
+                print(f"  {'token':<14} {'how':<9} {'liq':>11} {'vol24':>11} "
+                      f"{'tx24':>6} {'round-trip':>11}  verdict")
+                print("  " + "-" * 100)
+
+                tradable = safe = 0
+                for key, (base, contract, example) in list(calls.items())[:args.limit]:
+                    resolution = await tokens.resolve(
+                        contract=contract if contract else None,
+                        ticker=base or None,
+                    )
+                    label = (base or (contract or "")[:12]) or "?"
+
+                    if not resolution.ok:
+                        print(f"  {label:<14} {'—':<9} {'':>11} {'':>11} {'':>6} "
+                              f"{'':>11}  {resolution.reason[:44]}")
+                        continue
+
+                    pair = resolution.best
+                    verdict = await checker.check(
+                        resolution.mint, symbol=label,
+                        notional_usd=args.notional, limits=limits, pair=pair,
+                    )
+                    if verdict.tradable:
+                        tradable += 1
+                    if verdict.safe:
+                        safe += 1
+
+                    rt = (f"{verdict.round_trip_pct:+.1f}%"
+                          if verdict.round_trip_pct is not None else "—")
+                    print(f"  {label:<14} {resolution.source:<9} "
+                          f"${pair.liquidity_usd:>10,.0f} ${pair.volume_h24:>10,.0f} "
+                          f"{pair.txns_h24:>6} {rt:>11}  {verdict.verdict[:44]}"
+                          if pair else
+                          f"  {label:<14} {resolution.source:<9} {'':>11} {'':>11} "
+                          f"{'':>6} {rt:>11}  {verdict.verdict[:44]}")
+                    await asyncio.sleep(args.pace)
+
+                checked = min(len(calls), args.limit)
+                print(f"\n  {tradable}/{checked} tradable, {safe}/{checked} pass every "
+                      f"safety threshold at ${args.notional:.0f}\n")
+
+                if tradable == 0:
+                    print("  Every call this channel made is unroutable. Execution "
+                          "cannot fix that: there is nothing on the other side.\n")
+                elif safe == 0:
+                    print("  Some route, none clears the thresholds. Trading these "
+                          "means accepting the cost the round trip just measured.\n")
+
+        return 0
+
+    return asyncio.run(_go())
+
+
 def cmd_gate(args: argparse.Namespace) -> int:
     cfg = _load(args)
     status = PromotionGate(cfg.gate, config_fingerprint(cfg)).status()
@@ -1279,6 +1417,22 @@ def build_parser() -> argparse.ArgumentParser:
     ins.add_argument("--no-venue-check", action="store_true",
                      help="skip checking symbols against the venue's listings")
     ins.set_defaults(func=cmd_inspect)
+
+    sc = sub.add_parser("solana-check",
+                        help="are a channel's calls tradable on Solana at all?")
+    sc.add_argument("--from-export", required=True, metavar="PATH")
+    sc.add_argument("--channel", help="only channels whose name contains this")
+    sc.add_argument("--days", type=int, default=30)
+    sc.add_argument("--limit", type=int, default=40,
+                    help="max tokens checked per channel")
+    sc.add_argument("--notional", type=float, default=10.0,
+                    help="position size the quotes are taken at")
+    sc.add_argument("--min-liquidity", type=float, default=15_000.0)
+    sc.add_argument("--min-volume", type=float, default=10_000.0)
+    sc.add_argument("--min-txns", type=int, default=100)
+    sc.add_argument("--pace", type=float, default=0.3,
+                    help="seconds between tokens, to stay inside rate limits")
+    sc.set_defaults(func=cmd_solana_check)
 
     g = sub.add_parser("gate", help="show promotion-gate status")
     g.set_defaults(func=cmd_gate)
