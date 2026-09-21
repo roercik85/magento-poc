@@ -16,7 +16,7 @@ import os
 import signal
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .config import Config, ConfigError, load_config
 from .engine import RunResult
@@ -911,6 +911,8 @@ def cmd_solana_check(args: argparse.Namespace) -> int:
             min_txns_h24=args.min_txns,
         )
 
+        ranking: List[Dict[str, Any]] = []
+
         async with aiohttp.ClientSession() as session:
             tokens = SolanaTokens(session)
             checker = TokenSafetyChecker(session)
@@ -934,16 +936,26 @@ def cmd_solana_check(args: argparse.Namespace) -> int:
                     calls[key] = (base, sig.contract if sig else key,
                                   " ".join(m.text.split())[:52])
 
-                print("=" * 104)
-                print(f"{history.name}  —  {len(calls)} distinct token(s) called")
-                print("=" * 104)
+                with_address = sum(1 for _b, c, _e in calls.values() if c)
+
+                if not args.brief:
+                    print("=" * 104)
+                    print(f"{history.name}  —  {len(calls)} distinct token(s) called, "
+                          f"{with_address} with a contract address")
+                    print("=" * 104)
                 if not calls:
-                    print("  nothing to check\n")
+                    if not args.brief:
+                        print("  nothing to check\n")
+                    ranking.append({
+                        "name": history.name, "calls": 0, "with_address": 0,
+                        "checked": 0, "tradable": 0, "safe": 0,
+                    })
                     continue
 
-                print(f"  {'token':<14} {'how':<9} {'liq':>11} {'vol24':>11} "
-                      f"{'tx24':>6} {'round-trip':>11}  verdict")
-                print("  " + "-" * 100)
+                if not args.brief:
+                    print(f"  {'token':<14} {'how':<9} {'liq':>11} {'vol24':>11} "
+                          f"{'tx24':>6} {'round-trip':>11}  verdict")
+                    print("  " + "-" * 100)
 
                 tradable = safe = 0
                 for key, (base, contract, example) in list(calls.items())[:args.limit]:
@@ -954,8 +966,9 @@ def cmd_solana_check(args: argparse.Namespace) -> int:
                     label = (base or (contract or "")[:12]) or "?"
 
                     if not resolution.ok:
-                        print(f"  {label:<14} {'—':<9} {'':>11} {'':>11} {'':>6} "
-                              f"{'':>11}  {resolution.reason[:44]}")
+                        if not args.brief:
+                            print(f"  {label:<14} {'—':<9} {'':>11} {'':>11} {'':>6} "
+                                  f"{'':>11}  {resolution.reason[:44]}")
                         continue
 
                     pair = resolution.best
@@ -968,30 +981,91 @@ def cmd_solana_check(args: argparse.Namespace) -> int:
                     if verdict.safe:
                         safe += 1
 
-                    rt = (f"{verdict.round_trip_pct:+.1f}%"
-                          if verdict.round_trip_pct is not None else "—")
-                    print(f"  {label:<14} {resolution.source:<9} "
-                          f"${pair.liquidity_usd:>10,.0f} ${pair.volume_h24:>10,.0f} "
-                          f"{pair.txns_h24:>6} {rt:>11}  {verdict.verdict[:44]}"
-                          if pair else
-                          f"  {label:<14} {resolution.source:<9} {'':>11} {'':>11} "
-                          f"{'':>6} {rt:>11}  {verdict.verdict[:44]}")
+                    if not args.brief:
+                        rt = (f"{verdict.round_trip_pct:+.1f}%"
+                              if verdict.round_trip_pct is not None else "—")
+                        if pair:
+                            print(f"  {label:<14} {resolution.source:<9} "
+                                  f"${pair.liquidity_usd:>10,.0f} "
+                                  f"${pair.volume_h24:>10,.0f} "
+                                  f"{pair.txns_h24:>6} {rt:>11}  "
+                                  f"{verdict.verdict[:44]}")
+                        else:
+                            print(f"  {label:<14} {resolution.source:<9} {'':>11} "
+                                  f"{'':>11} {'':>6} {rt:>11}  "
+                                  f"{verdict.verdict[:44]}")
                     await asyncio.sleep(args.pace)
 
                 checked = min(len(calls), args.limit)
-                print(f"\n  {tradable}/{checked} tradable, {safe}/{checked} pass every "
-                      f"safety threshold at ${args.notional:.0f}\n")
+                ranking.append({
+                    "name": history.name, "calls": len(calls),
+                    "with_address": with_address, "checked": checked,
+                    "tradable": tradable, "safe": safe,
+                })
+                if not args.brief:
+                    print(f"\n  {tradable}/{checked} tradable, {safe}/{checked} pass "
+                          f"every safety threshold at ${args.notional:.0f}\n")
+                else:
+                    print(f"  · {history.name[:40]:<40} {safe}/{checked} usable")
 
-                if tradable == 0:
-                    print("  Every call this channel made is unroutable. Execution "
-                          "cannot fix that: there is nothing on the other side.\n")
-                elif safe == 0:
-                    print("  Some route, none clears the thresholds. Trading these "
-                          "means accepting the cost the round trip just measured.\n")
-
+        _print_solana_ranking(ranking, args.notional)
         return 0
 
     return asyncio.run(_go())
+
+
+def _print_solana_ranking(rows: List[Dict[str, Any]], notional: float) -> None:
+    """Rank channels by what actually survives to a fill.
+
+    With one channel the per-token detail is the output. With twenty it is
+    noise, and the decision-relevant number is how much of each channel's
+    output can be traded at all.
+    """
+    if len(rows) < 2:
+        return
+
+    rows = sorted(rows, key=lambda r: (-r["safe"], -r["tradable"], -r["calls"]))
+    print("\n" + "=" * 104)
+    print(f"RANKING — {len(rows)} channel(s), quotes taken at ${notional:.0f}")
+    print("=" * 104)
+    print(f"  {'channel':<40} {'calls':>6} {'w/ addr':>8} {'tradable':>9} "
+          f"{'usable':>7}  note")
+    print("  " + "-" * 100)
+
+    for r in rows:
+        checked = r["checked"] or 1
+        addr_pct = 100.0 * r["with_address"] / (r["calls"] or 1)
+        if r["calls"] == 0:
+            note = "no calls"
+        elif r["tradable"] == 0:
+            note = "nothing routes — execution cannot help"
+        elif r["safe"] == 0:
+            note = "routes, but none clears the thresholds"
+        elif r["safe"] / checked >= 0.5:
+            note = "worth recording live"
+        else:
+            note = f"{100.0 * r['safe'] / checked:.0f}% usable"
+        print(f"  {r['name'][:40]:<40} {r['calls']:>6} {addr_pct:>7.0f}% "
+              f"{r['tradable']:>9} {r['safe']:>7}  {note}")
+
+    best = rows[0]
+    print()
+    if best["safe"] == 0:
+        print("  Nothing here is tradable. That is a result: these channels call "
+              "tokens\n  that cannot be bought and sold at your size, and no "
+              "amount of execution\n  work changes what is on the other side.")
+    else:
+        print(f"  Start with {best['name']}: {best['safe']} of {best['checked']} "
+              f"calls survive to a fill.")
+
+    # The DEX-specific quality signal, worth stating because it is actionable.
+    addressed = [r for r in rows if r["calls"] and r["with_address"] / r["calls"] > 0.5]
+    if addressed:
+        print(f"\n  {len(addressed)} channel(s) post contract addresses with most "
+              f"calls. Those are the\n  tradable ones by construction: a bare "
+              f"ticker can name a dozen different mints,\n  and this refuses to "
+              f"guess between them.")
+    print()
 
 
 def cmd_gate(args: argparse.Namespace) -> int:
@@ -1432,6 +1506,8 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument("--min-txns", type=int, default=100)
     sc.add_argument("--pace", type=float, default=0.3,
                     help="seconds between tokens, to stay inside rate limits")
+    sc.add_argument("--brief", action="store_true",
+                    help="skip per-token detail and print only the channel ranking")
     sc.set_defaults(func=cmd_solana_check)
 
     g = sub.add_parser("gate", help="show promotion-gate status")

@@ -222,6 +222,22 @@ measurement catches, at the position's real size:
 Run this before building anything on top of a channel. If nothing routes, no
 amount of execution work helps: there is nothing on the other side.
 
+With several channels, `--brief` drops the per-token detail and prints a
+ranking by how much of each channel's output survives to a fill:
+
+```
+  channel                       calls  w/ addr  tradable  usable  note
+  Addr Callers                      3     100%         3       3  worth recording live
+  Mixed                             3      33%         1       1  33% usable
+  Ticker Only                       3       0%         1       0  routes, but none clears thresholds
+```
+
+The `w/ addr` column is the quality signal that matters on a DEX and has no
+equivalent on an exchange: **a channel that posts contract addresses is
+tradable by construction, and one that posts bare tickers mostly is not.** A
+ticker can name a dozen different mints, and this refuses to guess between
+them.
+
 ### 4. `fetch-prices` — get the prices to judge against *(Binance only)*
 
 ```bash
@@ -440,7 +456,7 @@ tell you this strategy prints money. It does not.
 ## Tests
 
 ```bash
-pytest -q        # 293 tests
+pytest -q        # 302 tests
 ```
 
 Covering parser precision (including the false positives that would fire market

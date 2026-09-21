@@ -281,3 +281,77 @@ def test_the_sell_is_quoted_for_the_full_position():
     run(TokenSafetyChecker(session).check("MINT1", notional_usd=10.0))
     sell_call = [c for c in session.calls if c[1].get("inputMint") == "MINT1"]
     assert sell_call[0][1]["amount"] == "123456789"
+
+
+# --------------------------------------------------------------------------
+# cross-channel ranking
+# --------------------------------------------------------------------------
+def row(name, *, calls=10, with_address=0, checked=10, tradable=0, safe=0):
+    return {"name": name, "calls": calls, "with_address": with_address,
+            "checked": checked, "tradable": tradable, "safe": safe}
+
+
+def rank(rows, capsys, notional=10.0):
+    from pumpbot.cli import _print_solana_ranking
+
+    _print_solana_ranking(rows, notional)
+    return capsys.readouterr().out
+
+
+def test_ranking_is_skipped_for_a_single_channel(capsys):
+    """With one channel the per-token detail is the output."""
+    assert rank([row("only")], capsys) == ""
+
+
+def test_channels_are_ordered_by_what_survives_to_a_fill(capsys):
+    out = rank([
+        row("mediocre", tradable=5, safe=2),
+        row("best", tradable=8, safe=7),
+        row("dead", tradable=0, safe=0),
+    ], capsys)
+    positions = [out.index(n) for n in ("best", "mediocre", "dead")]
+    assert positions == sorted(positions)
+    assert "Start with best" in out
+
+
+def test_a_channel_that_routes_nothing_says_execution_cannot_help(capsys):
+    out = rank([row("dead", tradable=0, safe=0), row("other", tradable=1, safe=1)],
+               capsys)
+    assert "nothing routes — execution cannot help" in out
+
+
+def test_routing_without_clearing_thresholds_is_distinguished(capsys):
+    out = rank([row("thin", tradable=6, safe=0), row("ok", tradable=6, safe=6)],
+               capsys)
+    assert "routes, but none clears the thresholds" in out
+
+
+def test_all_dead_says_so_plainly(capsys):
+    out = rank([row("a", tradable=0, safe=0), row("b", tradable=2, safe=0)], capsys)
+    assert "Nothing here is tradable" in out
+    assert "no amount of execution" in out
+
+
+def test_address_posting_channels_are_called_out(capsys):
+    """The DEX-specific quality signal: a bare ticker can name a dozen mints,
+    so a channel that posts addresses is tradable by construction."""
+    out = rank([
+        row("addresses", calls=10, with_address=9, tradable=9, safe=8),
+        row("tickers", calls=10, with_address=0, tradable=1, safe=0),
+    ], capsys)
+    assert "1 channel(s) post contract addresses" in out
+    assert "100%" not in out.split("RANKING")[0]        # no stray percentages
+
+
+def test_address_share_is_reported_per_channel(capsys):
+    out = rank([
+        row("half", calls=10, with_address=5, tradable=5, safe=5),
+        row("none", calls=10, with_address=0, tradable=1, safe=1),
+    ], capsys)
+    assert "50%" in out
+
+
+def test_a_channel_with_no_calls_does_not_divide_by_zero(capsys):
+    out = rank([row("silent", calls=0, checked=0), row("other", tradable=1, safe=1)],
+               capsys)
+    assert "no calls" in out
