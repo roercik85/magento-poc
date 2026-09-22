@@ -425,3 +425,20 @@ def test_word_and_phrase_codes_are_called_out():
 
     assert "WORD" in _CODE_DESTINATIONS["SentCodeTypeSmsWord"]
     assert "PHRASE" in _CODE_DESTINATIONS["SentCodeTypeSmsPhrase"]
+
+
+def test_binance_profile_is_valid_and_uses_the_public_data_host():
+    """The analysis must run where trading cannot: api.binance.com is
+    geo-blocked in places where data-api.binance.vision is not, and measuring
+    Binance channels somewhere else is what produced the previous mistake."""
+    from pathlib import Path
+
+    cfg = load_config(Path(__file__).resolve().parents[1] / "config.binance.example.yaml")
+    assert cfg.marketdata.venue == "binance"
+    assert "binance.vision" in cfg.marketdata.rest_base
+    assert "api.binance.com" not in cfg.marketdata.rest_base
+    # Second-resolution history, so the horizons a pump lives on are measurable.
+    assert cfg.scoring.primary_horizon_s < 300
+    assert 5 in cfg.marketdata.return_horizons_s
+    # Binance's MIN_NOTIONAL is 5 USDT on most pairs.
+    assert cfg.risk.position_notional_quote >= 5.0

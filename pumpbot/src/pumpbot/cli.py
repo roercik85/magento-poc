@@ -469,11 +469,17 @@ def cmd_triage(args: argparse.Namespace) -> int:
 
     # At one-minute resolution a 30s horizon is noise. Force something the data
     # can actually support, and say so rather than quietly scoring garbage.
-    if cfg.scoring.primary_horizon_s < 300:
-        print(f"▸ scoring horizon raised {cfg.scoring.primary_horizon_s}s -> 300s "
-              f"for triage: 1-minute candles cannot resolve anything shorter")
-        cfg.scoring.primary_horizon_s = 300
-    cfg.marketdata.return_horizons_s = [60, 300, 900, 1800]
+    if cfg.marketdata.venue == "binance":
+        # Second-resolution history, so the horizons that matter for a pump
+        # are measurable retrospectively and nothing has to be rounded up.
+        cfg.marketdata.return_horizons_s = [5, 15, 30, 60, 120, 300, 900, 1800]
+    else:
+        if cfg.scoring.primary_horizon_s < 300:
+            print(f"▸ scoring horizon raised {cfg.scoring.primary_horizon_s}s -> "
+                  f"300s for triage: 1-minute candles cannot resolve anything "
+                  f"shorter")
+            cfg.scoring.primary_horizon_s = 300
+        cfg.marketdata.return_horizons_s = [60, 300, 900, 1800]
     cfg.scoring.min_signals_for_score = args.min_calls
 
     async def _go() -> int:
@@ -481,8 +487,14 @@ def cmd_triage(args: argparse.Namespace) -> int:
 
         from .ingest.history import screen, summarise
         from .marketdata.historical import HistoricalFeed
-        from .marketdata.kucoin import KucoinSymbols, fetch_klines
         from .parsing.extractor import SignalExtractor
+
+        if cfg.marketdata.venue == "binance":
+            from .marketdata.binance import BinanceSymbols as VenueSymbols
+            from .marketdata.binance import fetch_klines as venue_fetch_klines
+        else:
+            from .marketdata.kucoin import KucoinSymbols as VenueSymbols
+            from .marketdata.kucoin import fetch_klines as venue_fetch_klines
 
         if not args.from_export:
             from telethon import TelegramClient
@@ -570,7 +582,7 @@ def cmd_triage(args: argparse.Namespace) -> int:
         # regex hit. Prose false positives would otherwise inflate a channel's
         # call rate and can reject it for volume it never had.
         async with aiohttp.ClientSession() as session:
-            symbols = await KucoinSymbols.load(session, cfg.marketdata.rest_base)
+            symbols = await VenueSymbols.load(session, cfg.marketdata.rest_base)
         print(f"\n▸ {len(symbols)} symbols listed on {cfg.marketdata.venue}")
 
         def is_tradable(symbol: str) -> bool:
@@ -639,8 +651,9 @@ def cmd_triage(args: argparse.Namespace) -> int:
                       file=sys.stderr)
                 return 1
 
-            print("▸ fetching 1m candles (this paces itself to stay inside the "
-                  "rate limit)…")
+            grain = ("1s around each call + 1m for the days before"
+                     if cfg.marketdata.venue == "binance" else "1m candles")
+            print(f"▸ fetching {grain} (paced to stay inside the rate limit)…")
             done = [0]
 
             def progress(venue: str, rows: int) -> None:
@@ -649,12 +662,25 @@ def cmd_triage(args: argparse.Namespace) -> int:
                     mark = "✗" if rows == 0 else "·"
                     print(f"  {mark} {done[0]}/{len(listed)} {venue} {rows} bars")
 
-            await fetch_klines(
-                session, pairs, prices_path,
-                rest_base=cfg.marketdata.rest_base,
-                window_before_s=args.before, window_after_s=args.after,
-                symbols=symbols, progress=progress,
-            )
+            if cfg.marketdata.venue == "binance":
+                # One-second candles around each call, minutes for the days
+                # before it. Binance serves both; KuCoin's floor is a minute,
+                # which cannot see a thirty-second spike at all.
+                await venue_fetch_klines(
+                    session, pairs, prices_path,
+                    base=cfg.marketdata.rest_base,
+                    spike_before_s=min(args.before, 1_800),
+                    spike_after_s=args.after,
+                    lookback_days=max(args.before // 86_400, 3),
+                    symbols=symbols, progress=progress,
+                )
+            else:
+                await venue_fetch_klines(
+                    session, pairs, prices_path,
+                    rest_base=cfg.marketdata.rest_base,
+                    window_before_s=args.before, window_after_s=args.after,
+                    symbols=symbols, progress=progress,
+                )
 
         feed = HistoricalFeed.from_file(prices_path)
         covered, total, missing = feed.coverage([s for s, _ in pairs])
@@ -705,9 +731,15 @@ def cmd_triage(args: argparse.Namespace) -> int:
         for fmt, path in paths.items():
             print(f"  report ({fmt}): {path}")
 
-        print("\nNext: record the survivors live. One-minute candles cannot price a "
-              "30-second spike, so these scores rank channels — they do not tell you "
-              "what a fast bot would have been filled at.")
+        if cfg.marketdata.venue == "binance":
+            print("\nThese are second-resolution measurements taken from the price "
+                  "at the post.\nThey still are not fill prices: a real entry "
+                  "arrives later and pays the spread,\nso treat them as the "
+                  "ceiling on what a follower could have captured.")
+        else:
+            print("\nNext: record the survivors live. One-minute candles cannot "
+                  "price a 30-second spike, so these scores rank channels — they "
+                  "do not tell you what a fast bot would have been filled at.")
         return 0
 
     return asyncio.run(_go())

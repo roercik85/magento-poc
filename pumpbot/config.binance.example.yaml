@@ -1,0 +1,112 @@
+# ===========================================================================
+#  pumpbot — Binance profile
+#
+#  Use this when the channels name Binance pairs, which most "pump" channels
+#  do. Two endpoints are involved and they are deliberately different:
+#
+#    marketdata.rest_base  data-api.binance.vision
+#        Public market data. No key, no geo-block, reachable from anywhere.
+#        Everything analytical — triage, scoring, backtests — uses this.
+#
+#    trading               api.binance.com  (set only for `live`)
+#        Needs credentials and returns HTTP 451 in several jurisdictions.
+#
+#  Why this matters: an earlier run measured Binance-targeted channels on
+#  KuCoin, because Binance was unreachable from the machine doing the
+#  analysis. Twelve of thirty-six symbols were dropped as "not listed" —
+#  including tokens with half a million dollars of daily volume — and the
+#  leftovers were reported as a verdict on the channels.
+#
+#  Binance also serves ONE-SECOND klines at least thirty days back. KuCoin's
+#  floor is one minute, which cannot see a thirty-second spike at all. On this
+#  venue a pump that peaks forty seconds after a call is measurable
+#  retrospectively, for free, with no weeks of live recording.
+# ===========================================================================
+
+mode: simulate
+run_label: "binance"
+
+telegram:
+  api_id: 0                    # or PUMPBOT_TG_API_ID in the environment
+  api_hash: ""                 # or PUMPBOT_TG_API_HASH
+  session_name: "state/pumpbot"
+  watch_edits: true
+  channels: []
+
+parsing:
+  min_confidence: 0.70
+  ignore_symbols: [BTC, ETH, USDT, USDC, BNB, SOL, XRP, ADA, DOGE, TRX, DAI,
+                   BUSD, TUSD, WBTC, WETH, STETH, LINK, MATIC, DOT, AVAX]
+  quote_assets: [USDT]
+  accept_contracts: false
+
+marketdata:
+  venue: binance
+  rest_base: "https://data-api.binance.vision"
+  ws_base: "wss://stream.binance.com:9443"
+  record_window_s: 900
+  # Second-resolution history means these are all measurable after the fact.
+  return_horizons_s: [5, 15, 30, 60, 120, 300, 900, 1800]
+
+execution:
+  venue: binance
+  simulation:
+    latency_ms_median: 220
+    latency_ms_sigma: 0.55
+    telegram_fanout_ms_median: 90
+    telegram_fanout_ms_sigma: 0.6
+    slippage_bps_base: 35
+    slippage_impact_coeff: 250
+    assumed_depth_quote: 25000
+    taker_fee_bps: 10
+    reject_probability: 0.04
+  live:
+    api_key_env: "PUMPBOT_API_KEY"
+    api_secret_env: "PUMPBOT_API_SECRET"
+    recv_window_ms: 5000
+    max_notional_quote_hard_cap: 10.0
+
+risk:
+  quote_asset: USDT
+  starting_equity: 100.0
+  # Binance's MIN_NOTIONAL is 5 USDT on most pairs, unlike KuCoin's 0.1, so a
+  # position cannot be made arbitrarily small here.
+  position_notional_quote: 6.0
+  max_concurrent_positions: 3
+  max_trades_per_run: 30
+  daily_drawdown_stop_pct: 25.0
+  symbol_cooldown_s: 900
+  min_channel_score: 0.0
+  blocked_symbols: []
+
+strategy:
+  take_profit_ladder:
+    - { gain_pct: 4.0,  fraction: 0.50 }
+    - { gain_pct: 9.0,  fraction: 0.50 }
+  stop_loss_pct: 6.0
+  trailing_stop_pct: 5.0
+  max_hold_s: 120
+  max_entry_chase_pct: 6.0
+
+scoring:
+  min_signals_for_score: 8
+  # No rounding up to 300s here: the data supports the horizon a pump actually
+  # lives on.
+  primary_horizon_s: 30
+  relay_penalty_weight: 0.35
+  weights:
+    hit_rate: 0.30
+    median_return: 0.30
+    originator: 0.20
+    consistency: 0.20
+
+gate:
+  required_profitable_runs: 10
+  require_consecutive: true
+  min_trades_per_run: 5
+  min_net_return_pct: 0.0
+  state_file: "state/gate.json"
+
+reporting:
+  output_dir: "runs"
+  formats: [markdown, json, html]

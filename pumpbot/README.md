@@ -374,11 +374,24 @@ because ten such runs in a row is exactly how noise passes a ten-run gate.
 | | KuCoin | Binance |
 |---|---|---|
 | Live execution | ✅ | ✅ |
-| Tradable USDT pairs | 833 | — |
+| Tradable USDT pairs | 833 | 1370 |
 | Minimum order | **0.1 USDT**, every pair | 5 USDT on most pairs |
 | Taker fee | 0.1% | 0.1% |
-| Historical sub-minute prices | ❌ none — must record live | ✅ 1s klines via REST |
+| Historical sub-minute prices | ❌ none — must record live | ✅ **1-second klines, 30+ days back** |
+| Market data without a key or geo-block | ✅ | ✅ via `data-api.binance.vision` |
 | Measured slippage, 10 USDT order | ~12 bps one-way | — |
+
+**Pick the venue the channels actually name.** Most "pump" channels target
+Binance, and measuring them elsewhere throws away the calls that matter: a run
+against KuCoin dropped twelve of thirty-six symbols as "not listed", including
+tokens with over half a million dollars of daily volume, then reported a
+verdict on the leftovers.
+
+Binance's one-second klines also remove the need to record live before
+learning anything. A pump that peaks forty seconds after a call is measurable
+retrospectively — `triage` fetches seconds around each call and minutes for the
+three days before it, which is the window where accumulation ahead of a call
+shows up. Use `config.binance.example.yaml`.
 
 KuCoin is the default. It is where low-cap pump targets more often live, its
 0.1 USDT minimum makes small live tests possible, and its books at 5-10 USDT
@@ -451,7 +464,7 @@ risk/manager.py       cooldowns, concurrency, drawdown halt, channel filter
 strategy/pump.py      entry chase guard; stop / trailing / ladder / time exits
    ↓
 execution/            simulator.py | live_binance.py | live_kucoin.py
-marketdata/           feed.py | historical.py | kucoin.py | onchain.py | chains.py
+marketdata/           feed.py | historical.py | binance.py | kucoin.py | onchain.py
 risk/token_safety.py  round-trip quote: honeypot, tax and depth in one check
    ↓
 scoring/channels.py   hit rate, net median, originator, pre-post run
@@ -476,7 +489,7 @@ tell you this strategy prints money. It does not.
 ## Tests
 
 ```bash
-pytest -q        # 318 tests
+pytest -q        # 337 tests
 ```
 
 Covering parser precision (including the false positives that would fire market
