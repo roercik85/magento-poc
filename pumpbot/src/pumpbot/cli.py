@@ -1505,8 +1505,9 @@ def build_parser() -> argparse.ArgumentParser:
     tr.add_argument("--min-calls", type=int, default=8,
                     help="calls a channel needs before it gets a score")
     tr.add_argument("--min-score", type=float, default=0.50)
-    tr.add_argument("--before", type=int, default=600,
-                    help="seconds of candles before each call")
+    tr.add_argument("--before", type=int, default=259_200,
+                    help="seconds of candles before each call (default 3 days, "
+                         "so accumulation that starts days ahead is visible)")
     tr.add_argument("--after", type=int, default=1800,
                     help="seconds after each call")
     tr.add_argument("--prices-out", default="data/recorded/triage_prices.jsonl")

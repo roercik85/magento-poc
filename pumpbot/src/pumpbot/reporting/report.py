@@ -359,6 +359,30 @@ def render_markdown(result: RunResult, gate: Optional[GateStatus] = None) -> str
         )
         a("")
 
+        windowed = [c for c in result.channel_scores if c.pre_run_windows]
+        if windowed:
+            a("### How far it had already moved before the call")
+            a("")
+            windows = sorted({w for c in windowed for w in c.pre_run_windows})
+            a("| Channel | " + " | ".join(_window_label(w) for w in windows) + " |")
+            a("|---" * (len(windows) + 1) + "|")
+            for c in windowed:
+                cells = [
+                    _sign(c.pre_run_windows[w], 1, "%") if w in c.pre_run_windows
+                    else "n/a"
+                    for w in windows
+                ]
+                a(f"| `{c.name}` | " + " | ".join(cells) + " |")
+            a("")
+            a(
+                "> Five minutes is the wrong window for organised accumulation, "
+                "which starts days ahead. A call whose token is flat over five "
+                "minutes and up 80% over three days was positioned long before "
+                "you were told about it — and the short column alone reads as "
+                "though nobody front-ran it."
+            )
+            a("")
+
         horizon = _hint_horizon(result)
         if horizon is not None:
             best_h, configured = horizon
@@ -431,6 +455,14 @@ def _hint_horizon(result: RunResult) -> Optional[tuple]:
     if configured and abs(best - configured) / configured > 0.5:
         return int(best), configured
     return None
+
+
+def _window_label(seconds: int) -> str:
+    if seconds < 3_600:
+        return f"{seconds // 60}m"
+    if seconds < 86_400:
+        return f"{seconds // 3_600}h"
+    return f"{seconds // 86_400}d"
 
 
 def _headline_verdict(result: RunResult) -> str:

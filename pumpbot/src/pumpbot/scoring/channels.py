@@ -48,7 +48,12 @@ class SignalObservation:
     price_at_post: float
     returns_pct: Dict[int, float] = field(default_factory=dict)
     mae_pct: float = 0.0              # worst drawdown within the primary horizon
-    pre_run_pct: float = 0.0          # move over the 5 min BEFORE the post
+    pre_run_pct: float = 0.0          # move over the short window before the post
+    # Move over several windows before the post, keyed by seconds. Accumulation
+    # ahead of a call is not a five-minute phenomenon: the buying that matters
+    # can start days earlier, and a short window reports 0% for it — which
+    # reads as "no pre-positioning" when it means "not measured".
+    pre_run_windows: Dict[int, float] = field(default_factory=dict)
     cost_pct: float = 0.0             # modelled round-trip cost for this venue
 
 
@@ -142,6 +147,7 @@ class ChannelScorer:
         mean_ret = statistics.fmean(nets)
         median_mae = statistics.median([o.mae_pct for o in usable])
         pre_run = statistics.median([o.pre_run_pct for o in usable])
+        pre_windows = self._median_pre_windows(usable)
 
         originator = self._originator_score(leads, pre_run)
         consistency = self._consistency(nets)
@@ -167,11 +173,21 @@ class ChannelScorer:
             originator_score=originator,
             consistency=consistency,
             pre_pump_pct=pre_run,
+            pre_run_windows=pre_windows,
             best_horizon_s=best_h,
             best_horizon_return_pct=best_ret,
             composite=composite,
             verdict=self._verdict(hit_rate, median_ret, mean_ret, originator, pre_run),
         )
+
+    @staticmethod
+    def _median_pre_windows(usable: List[SignalObservation]) -> Dict[int, float]:
+        """Median pre-post move at each lookback that was measured."""
+        buckets: Dict[int, List[float]] = defaultdict(list)
+        for o in usable:
+            for window, pct in o.pre_run_windows.items():
+                buckets[window].append(pct)
+        return {w: statistics.median(v) for w, v in sorted(buckets.items()) if v}
 
     @staticmethod
     def _best_horizon(usable: List[SignalObservation]) -> Tuple[int, float]:

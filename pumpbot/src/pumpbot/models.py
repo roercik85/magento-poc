@@ -187,6 +187,7 @@ class ScoredChannel:
     originator_score: float          # 1.0 = first to call, 0.0 = pure relay
     consistency: float               # 1 - normalised dispersion of returns
     pre_pump_pct: float              # how much the price already moved pre-post
+    pre_run_windows: Dict[int, float]  # the same, at several lookbacks
     best_horizon_s: int              # holding period with the best median return
     best_horizon_return_pct: float   # that median, net of costs
     composite: float

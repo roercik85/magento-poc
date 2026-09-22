@@ -128,6 +128,12 @@ class RunResult:
         return out
 
 
+# Lookbacks for measuring how far a token had already moved before the call.
+# The long ones exist because organised accumulation shows up over days, not
+# minutes, and measuring only the short window cannot tell the two apart.
+_PRE_RUN_WINDOWS_S = (300, 3_600, 21_600, 86_400, 259_200)
+
+
 class Engine:
     def __init__(
         self,
@@ -448,8 +454,16 @@ class Engine:
             if p is not None:
                 worst = min(worst, 100.0 * (p - price_at_post) / price_at_post)
 
-        pre = self.feed.price(symbol, post_ms - 300_000)
-        pre_run = 100.0 * (price_at_post - pre) / pre if pre and pre > 0 else 0.0
+        # Accumulation ahead of a call is not a five-minute phenomenon. Buying
+        # can start days before the post, and a short lookback reports 0% for
+        # it — which reads as "nobody positioned early" when it means "not
+        # measured over a window where it would show".
+        pre_windows: Dict[int, float] = {}
+        for window in _PRE_RUN_WINDOWS_S:
+            earlier = self.feed.price(symbol, post_ms - window * 1000.0)
+            if earlier and earlier > 0:
+                pre_windows[window] = 100.0 * (price_at_post - earlier) / earlier
+        pre_run = pre_windows.get(300, 0.0)
 
         self.scorer.observe(
             SignalObservation(
@@ -461,6 +475,7 @@ class Engine:
                 returns_pct=returns,
                 mae_pct=worst,
                 pre_run_pct=pre_run,
+                pre_run_windows=pre_windows,
                 cost_pct=self._round_trip_cost_pct(),
             )
         )

@@ -509,6 +509,11 @@ _KLINE_TURNOVER = 6
 # price file, which silently truncates the scoring.
 _KLINE_PACE_S = 0.25
 
+# The venue's hard cap per response, and a ceiling on how many pages one span
+# may cost — a wide window on a dense symbol should not run unbounded.
+_KLINE_PAGE_SIZE = 1500
+_KLINE_MAX_PAGES = 12
+
 
 async def fetch_klines(
     session,                                     # noqa: ANN001
@@ -566,29 +571,52 @@ async def fetch_klines(
         rows: List[str] = []
         compact = venue.replace("-", "")
         for start, end in spans:
-            params = (
-                f"type=1min&symbol={venue}&startAt={start}&endAt={end}"
-            )
-            try:
-                async with session.get(
-                    f"{rest_base}/api/v1/market/candles?{params}"
-                ) as resp:
-                    if resp.status == 429:
-                        await asyncio.sleep(5.0)
-                        continue
-                    payload = await resp.json()
-            except Exception:                    # noqa: BLE001 - delisted, network
-                continue
+            # KuCoin caps a response at 1500 candles and gives no indication
+            # that it truncated. A three-day window is 4320 minutes, so a
+            # single request silently returns only the most recent day and the
+            # rest of the span looks like a symbol with no history.
+            cursor = end
+            guard = 0
+            while cursor > start and guard < _KLINE_MAX_PAGES:
+                guard += 1
+                params = (
+                    f"type=1min&symbol={venue}&startAt={start}&endAt={cursor}"
+                )
+                try:
+                    async with session.get(
+                        f"{rest_base}/api/v1/market/candles?{params}"
+                    ) as resp:
+                        if resp.status == 429:
+                            await asyncio.sleep(5.0)
+                            continue
+                        payload = await resp.json()
+                except Exception:                # noqa: BLE001 - delisted, network
+                    break
 
-            for k in payload.get("data") or []:
-                rows.append(json.dumps({
-                    "symbol": compact,
-                    "t_ms": int(k[_KLINE_TIME]) * 1000,
-                    "close": float(k[_KLINE_CLOSE]),
-                    "high": float(k[_KLINE_HIGH]),
-                    "low": float(k[_KLINE_LOW]),
-                    "quote_volume": float(k[_KLINE_TURNOVER]),
-                }))
+                candles = payload.get("data") or []
+                if not candles:
+                    break
+
+                oldest = cursor
+                for k in candles:
+                    ts = int(k[_KLINE_TIME])
+                    oldest = min(oldest, ts)
+                    rows.append(json.dumps({
+                        "symbol": compact,
+                        "t_ms": ts * 1000,
+                        "close": float(k[_KLINE_CLOSE]),
+                        "high": float(k[_KLINE_HIGH]),
+                        "low": float(k[_KLINE_LOW]),
+                        "quote_volume": float(k[_KLINE_TURNOVER]),
+                    }))
+
+                if len(candles) < _KLINE_PAGE_SIZE or oldest <= start:
+                    break
+                # Step back past the oldest candle received; equal bounds would
+                # return the same page forever.
+                cursor = oldest - 60
+                await asyncio.sleep(_KLINE_PACE_S)
+
             await asyncio.sleep(_KLINE_PACE_S)
 
         if rows:

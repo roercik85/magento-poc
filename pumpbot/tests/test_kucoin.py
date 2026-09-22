@@ -236,3 +236,97 @@ def test_signature_headers_are_well_formed(monkeypatch):
         hashlib.sha256,
     ).digest()).decode()
     assert headers["KC-API-SIGN"] == expected
+
+
+# --- kline pagination ------------------------------------------------------
+def test_klines_paginate_past_the_venue_cap():
+    """KuCoin caps a response at 1500 candles and does not say it truncated.
+    A three-day window is 4320 minutes, so one request silently returns the
+    most recent day and the rest looks like a symbol with no history."""
+    import asyncio
+
+    from pumpbot.marketdata.kucoin import fetch_klines
+
+    now = 1_700_000_000
+    pages = []
+
+    class Resp:
+        def __init__(self, payload):
+            self._p = payload
+            self.status = 200
+
+        async def json(self):
+            return self._p
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class Session:
+        def get(self, url):
+            import urllib.parse as up
+
+            q = dict(up.parse_qsl(url.split("?", 1)[1]))
+            start, end = int(q["startAt"]), int(q["endAt"])
+            pages.append((start, end))
+            # Serve at most a full page, newest first, never below start.
+            newest = end
+            oldest = max(start, newest - 1500 * 60)
+            candles = [[str(t), "1", "1", "1", "1", "1", "10"]
+                       for t in range(newest, oldest, -60)]
+            return Resp({"code": "200000", "data": candles[:1500]})
+
+    class Symbols:
+        @staticmethod
+        def resolve(symbol):
+            return "X-USDT"
+
+    out = asyncio.run(fetch_klines(
+        Session(), [("XUSDT", now * 1000.0)], "/dev/null",
+        window_before_s=259_200, window_after_s=0, symbols=Symbols(),
+    ))
+    assert len(pages) > 1, "a three-day window was fetched in a single page"
+    # Each page must step strictly backwards, or it loops on the same data.
+    ends = [e for _s, e in pages]
+    assert ends == sorted(ends, reverse=True)
+    assert len(set(ends)) == len(ends)
+    assert out["XUSDT"] > 1500
+
+
+def test_pagination_stops_on_a_short_page():
+    import asyncio
+
+    from pumpbot.marketdata.kucoin import fetch_klines
+
+    calls = []
+
+    class Resp:
+        status = 200
+
+        async def json(self):
+            return {"code": "200000",
+                    "data": [["1700000000", "1", "1", "1", "1", "1", "10"]]}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class Session:
+        def get(self, url):
+            calls.append(url)
+            return Resp()
+
+    class Symbols:
+        @staticmethod
+        def resolve(symbol):
+            return "X-USDT"
+
+    asyncio.run(fetch_klines(
+        Session(), [("XUSDT", 1_700_000_000_000.0)], "/dev/null",
+        window_before_s=259_200, window_after_s=0, symbols=Symbols(),
+    ))
+    assert len(calls) == 1, "a short page means the history ended"
