@@ -492,7 +492,7 @@ def cmd_triage(args: argparse.Namespace) -> int:
         if cfg.marketdata.venue == "binance":
             from .marketdata.binance import BinanceSymbols as VenueSymbols
             from .marketdata.binance import fetch_klines as venue_fetch_klines
-            from .marketdata.binance import pick_data_base
+            from .marketdata.binance import FUTURES_BASE, pick_data_base
         else:
             from .marketdata.kucoin import KucoinSymbols as VenueSymbols
             from .marketdata.kucoin import fetch_klines as venue_fetch_klines
@@ -592,7 +592,20 @@ def cmd_triage(args: argparse.Namespace) -> int:
                     print(f"\n⚠ {note}")
                 else:
                     print(f"\n▸ market data from {data_base}")
-            symbols = await VenueSymbols.load(session, data_base)
+                symbols = await VenueSymbols.load(
+                    session, data_base,
+                    futures_base=None if args.spot_only else FUTURES_BASE,
+                )
+                futures = len(symbols.futures_symbols)
+                if futures:
+                    print(f"▸ {futures} perpetual future(s) merged — channels "
+                          f"named after Binance often mean futures, and several "
+                          f"popular tickers are perpetuals with no spot pair")
+                elif not args.spot_only:
+                    print("⚠ the futures endpoint could not be reached; "
+                          "perpetual-only tickers will be dropped as unlisted")
+            else:
+                symbols = await VenueSymbols.load(session, data_base)
         print(f"▸ {len(symbols)} symbols listed on {cfg.marketdata.venue}")
 
         def is_tradable(symbol: str) -> bool:
@@ -1604,6 +1617,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "so accumulation that starts days ahead is visible)")
     tr.add_argument("--after", type=int, default=1800,
                     help="seconds after each call")
+    tr.add_argument("--spot-only", action="store_true",
+                    help="Binance: do not merge the perpetual futures universe")
     tr.add_argument("--prices-out", default="data/recorded/triage_prices.jsonl")
     tr.add_argument("--write-config", help="write surviving channels to this JSON")
     tr.set_defaults(func=cmd_triage)

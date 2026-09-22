@@ -204,10 +204,10 @@ def test_the_full_host_is_preferred_when_reachable():
     assert note == ""
 
 
-def test_a_geo_block_falls_back_and_says_what_it_costs():
-    """The mirror's prices are current but its symbol list is smaller, and a
-    symbol it lacks is absent from klines too — so a call naming one is
-    dropped as unlisted rather than priced."""
+def test_a_geo_block_falls_back_and_says_so():
+    """Both hosts were observed serving the same trading symbols, so the note
+    states the substitution without claiming a coverage difference that the
+    data did not show."""
     from pumpbot.marketdata.binance import pick_data_base
 
     class Session:
@@ -217,7 +217,7 @@ def test_a_geo_block_falls_back_and_says_what_it_costs():
     base, note = run(pick_data_base(Session()))
     assert "binance.vision" in base
     assert "451" in note
-    assert "smaller" in note
+    assert "smaller" not in note
 
 
 def test_a_network_failure_also_falls_back():
@@ -230,3 +230,104 @@ def test_a_network_failure_also_falls_back():
     base, note = run(pick_data_base(Session()))
     assert "binance.vision" in base
     assert "OSError" in note
+
+
+# --- perpetual futures -----------------------------------------------------
+def futures_info(*symbols, contract="PERPETUAL"):
+    return {"symbols": [
+        {"symbol": s, "status": "TRADING", "contractType": contract,
+         "baseAsset": s[:-4], "quoteAsset": "USDT"}
+        for s in symbols
+    ]}
+
+
+def test_perpetuals_fill_the_gaps_spot_leaves():
+    """GRASS, MOODENG and CHILLGUY are perpetuals with no spot pair, so a
+    spot-only search drops those calls as "not listed" when the market the
+    channel meant is right there."""
+    from pumpbot.marketdata.binance import FUTURES, SPOT
+
+    s = BinanceSymbols.from_payload(info("HEMIUSDT"))
+    assert s.resolve("MOODENGUSDT") is None
+
+    added = s.merge_futures(futures_info("MOODENGUSDT", "GRASSUSDT"))
+    assert added == 2
+    assert s.resolve("MOODENGUSDT") == "MOODENGUSDT"
+    assert s.market("MOODENGUSDT") == FUTURES
+    assert s.market("HEMIUSDT") == SPOT
+
+
+def test_spot_wins_a_name_collision():
+    """A symbol tradable on both is traded on spot, where there is no funding
+    rate and no liquidation."""
+    from pumpbot.marketdata.binance import SPOT
+
+    s = BinanceSymbols.from_payload(info("HEMIUSDT"))
+    assert s.merge_futures(futures_info("HEMIUSDT")) == 0
+    assert s.market("HEMIUSDT") == SPOT
+
+
+def test_dated_contracts_are_not_merged():
+    s = BinanceSymbols.from_payload(info("HEMIUSDT"))
+    assert s.merge_futures(futures_info("BTCUSDT_240628",
+                                        contract="CURRENT_QUARTER")) == 0
+
+
+def test_futures_klines_use_the_futures_host_and_path(tmp_path):
+    from pumpbot.marketdata.binance import FUTURES_BASE
+
+    session = RecordingSession()
+    urls = []
+    original = session.get
+
+    def spy(url):
+        urls.append(url)
+        return original(url)
+
+    session.get = spy
+
+    symbols = BinanceSymbols.from_payload(info("AUSDT"))
+    symbols.merge_futures(futures_info("MOODENGUSDT"))
+    run(fetch_klines(session, [("MOODENGUSDT", 1_700_000_000_000)],
+                     tmp_path / "p.jsonl", symbols=symbols, lookback_days=0))
+
+    assert urls, "nothing was fetched"
+    assert all(FUTURES_BASE in u for u in urls)
+    assert all("/fapi/v1/klines" in u for u in urls)
+
+
+def test_spot_klines_keep_the_spot_path(tmp_path):
+    session = RecordingSession()
+    urls = []
+    original = session.get
+    session.get = lambda url: (urls.append(url), original(url))[1]
+
+    symbols = BinanceSymbols.from_payload(info("AUSDT"))
+    run(fetch_klines(session, [("AUSDT", 1_700_000_000_000)],
+                     tmp_path / "p.jsonl", symbols=symbols, lookback_days=0))
+    assert all("/api/v3/klines" in u for u in urls)
+
+
+def test_second_candles_fall_back_to_minutes_when_unavailable(tmp_path):
+    """The futures endpoint does not advertise 1s klines. Ask, then drop to
+    minutes rather than assuming either way and fetching nothing."""
+    intervals = []
+
+    class Session:
+        def get(self, url):
+            import urllib.parse as up
+
+            q = dict(up.parse_qsl(url.split("?", 1)[1]))
+            intervals.append(q["interval"])
+            if q["interval"] == "1s":
+                return Resp([])                  # unsupported: empty, not an error
+            return Resp([[int(q["startTime"]), "1", "1.1", "0.9", "1.05", "5",
+                          int(q["startTime"]) + 60_000, "50"]])
+
+    symbols = BinanceSymbols.from_payload(info("AUSDT"))
+    symbols.merge_futures(futures_info("MOODENGUSDT"))
+    out = run(fetch_klines(Session(), [("MOODENGUSDT", 1_700_000_000_000)],
+                           tmp_path / "p.jsonl", symbols=symbols, lookback_days=0))
+    assert intervals[0] == "1s"
+    assert "1m" in intervals
+    assert out["MOODENGUSDT"] > 0
