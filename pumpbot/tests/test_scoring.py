@@ -135,3 +135,69 @@ def test_best_horizon_can_be_the_shortest_one():
             mae_pct=0.0, pre_run_pct=0.0, cost_pct=0.0,
         ))
     assert s.score_all()[0].best_horizon_s == 5
+
+
+# --- channels that are copies of each other --------------------------------
+def test_channels_calling_the_same_things_are_grouped():
+    """Two channels posting the same calls are one source. Counting them
+    separately makes a single caller's record look corroborated."""
+    s = ChannelScorer(cfg())
+    for i in range(8):
+        sym = f"SYM{i}"
+        s.observe(obs(-1, "big pumps", sym, 2.0))
+        s.observe(obs(-2, "wall street", sym, 2.0))
+        s.observe(obs(-3, "independent", f"OTHER{i}", 2.0))
+
+    clusters = s.overlap_clusters()
+    assert len(clusters) == 1
+    assert [name for _cid, name in clusters[0]] == ["big pumps", "wall street"]
+
+
+def test_independent_channels_are_not_grouped():
+    s = ChannelScorer(cfg())
+    for i in range(8):
+        s.observe(obs(-1, "a", f"AAA{i}", 2.0))
+        s.observe(obs(-2, "b", f"BBB{i}", 2.0))
+    assert s.overlap_clusters() == []
+
+
+def test_a_couple_of_shared_symbols_is_not_a_duplicate():
+    """Two channels that each called the same two names are not one source."""
+    s = ChannelScorer(cfg())
+    for i in range(10):
+        s.observe(obs(-1, "a", f"AAA{i}", 2.0))
+        s.observe(obs(-2, "b", f"BBB{i}", 2.0))
+    for shared in ("SHARED1", "SHARED2"):
+        s.observe(obs(-1, "a", shared, 2.0))
+        s.observe(obs(-2, "b", shared, 2.0))
+    assert s.overlap_clusters() == []
+
+
+def test_three_copies_land_in_one_group():
+    s = ChannelScorer(cfg())
+    for i in range(8):
+        for cid, name in ((-1, "a"), (-2, "b"), (-3, "c")):
+            s.observe(obs(cid, name, f"SYM{i}", 2.0))
+    clusters = s.overlap_clusters()
+    assert len(clusters) == 1
+    assert len(clusters[0]) == 3
+
+
+def test_partial_overlap_below_the_threshold_stays_separate():
+    s = ChannelScorer(cfg())
+    for i in range(10):
+        s.observe(obs(-1, "a", f"SYM{i}", 2.0))
+    for i in range(3):
+        s.observe(obs(-2, "b", f"SYM{i}", 2.0))
+    for i in range(10, 17):
+        s.observe(obs(-2, "b", f"SYM{i}", 2.0))
+    # 3 shared out of 17 union — far below half.
+    assert s.overlap_clusters() == []
+
+
+def test_a_channel_with_no_observations_is_ignored():
+    s = ChannelScorer(cfg())
+    for i in range(8):
+        s.observe(obs(-1, "a", f"SYM{i}", 2.0))
+        s.observe(obs(-2, "b", f"SYM{i}", 2.0))
+    assert len(s.overlap_clusters()[0]) == 2

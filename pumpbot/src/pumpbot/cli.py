@@ -681,6 +681,15 @@ def cmd_triage(args: argparse.Namespace) -> int:
         for c in result.channel_scores:
             print(f"  {c.name}: {c.verdict}")
 
+        clusters = runner.engine.scorer.overlap_clusters()
+        if clusters:
+            print("\n▸ these channels call the same things — each group is ONE "
+                  "source, not several:")
+            for group in clusters:
+                print(f"    {' = '.join(name for _cid, name in group)}")
+            print("  Counting them separately inflates the sample and makes one "
+                  "caller's record\n  look corroborated by an independent one.")
+
         keep = [c for c in result.channel_scores if c.composite >= args.min_score]
         print(f"\n▸ {len(keep)} channel(s) scored >= {args.min_score}")
         if keep and args.write_config:

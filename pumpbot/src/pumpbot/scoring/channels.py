@@ -25,7 +25,7 @@ import math
 import statistics
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from ..config import ScoringConfig
 from ..models import ScoredChannel
@@ -253,6 +253,48 @@ class ChannelScorer:
         if hit_rate < 0.45:
             return "MARGINAL — positive median but fewer than half of calls work."
         return "CANDIDATE — positive net median, timely, acceptable hit rate."
+
+    # -- independence ---------------------------------------------------
+    def overlap_clusters(
+        self, *, min_shared: int = 3, min_jaccard: float = 0.5
+    ) -> List[List[Tuple[int, str]]]:
+        """Group channels that call the same things.
+
+        Two channels posting the same calls are one source, not two. Counting
+        them separately inflates the apparent sample and makes a single
+        caller's record look corroborated by an independent one — which is the
+        most flattering error available when deciding what to trade.
+
+        Similarity is Jaccard overlap on the set of symbols called, with a
+        floor on the shared count so two channels that each called the same
+        two majors are not declared identical.
+        """
+        symbols: Dict[int, Set[str]] = {}
+        for chat_id, obs_list in self._obs.items():
+            symbols[chat_id] = {o.symbol for o in obs_list}
+
+        ids = [cid for cid, syms in symbols.items() if syms]
+        parent = {cid: cid for cid in ids}
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        for i, a in enumerate(ids):
+            for b in ids[i + 1:]:
+                shared = symbols[a] & symbols[b]
+                if len(shared) < min_shared:
+                    continue
+                union = symbols[a] | symbols[b]
+                if union and len(shared) / len(union) >= min_jaccard:
+                    parent[find(a)] = find(b)
+
+        groups: Dict[int, List[Tuple[int, str]]] = defaultdict(list)
+        for cid in ids:
+            groups[find(cid)].append((cid, self._names.get(cid, str(cid))))
+        return [sorted(g, key=lambda x: x[1]) for g in groups.values() if len(g) > 1]
 
     # -- convenience ----------------------------------------------------
     def score_map(self) -> Dict[int, float]:
