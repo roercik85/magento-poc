@@ -856,7 +856,7 @@ def _print_parse_summary(history, extractor, listed, limit: int) -> None:  # noq
           f"{tradable} tradable here\n")
 
 
-def cmd_solana_check(args: argparse.Namespace) -> int:
+def cmd_onchain_check(args: argparse.Namespace) -> int:
     """Ask whether a channel's calls are tradable on Solana at all.
 
     This runs before any execution is built, because the answer decides
@@ -878,7 +878,7 @@ def cmd_solana_check(args: argparse.Namespace) -> int:
             explain_empty,
             read_export,
         )
-        from .marketdata.solana import SolanaTokens
+        from .marketdata.onchain import OnchainTokens
         from .parsing.extractor import SignalExtractor
         from .risk.token_safety import SafetyLimits, TokenSafetyChecker
 
@@ -914,7 +914,7 @@ def cmd_solana_check(args: argparse.Namespace) -> int:
         ranking: List[Dict[str, Any]] = []
 
         async with aiohttp.ClientSession() as session:
-            tokens = SolanaTokens(session)
+            tokens = OnchainTokens(session)
             checker = TokenSafetyChecker(session)
 
             for history in histories:
@@ -953,8 +953,8 @@ def cmd_solana_check(args: argparse.Namespace) -> int:
                     continue
 
                 if not args.brief:
-                    print(f"  {'token':<14} {'how':<9} {'liq':>11} {'vol24':>11} "
-                          f"{'tx24':>6} {'round-trip':>11}  verdict")
+                    print(f"  {'token':<12} {'chain':<10} {'how':<9} {'liq':>11} "
+                          f"{'vol24':>11} {'round-trip':>11}  verdict")
                     print("  " + "-" * 100)
 
                 resolved = tradable = safe = 0
@@ -967,15 +967,16 @@ def cmd_solana_check(args: argparse.Namespace) -> int:
 
                     if not resolution.ok:
                         if not args.brief:
-                            print(f"  {label:<14} {'—':<9} {'':>11} {'':>11} {'':>6} "
-                                  f"{'':>11}  {resolution.reason[:44]}")
+                            print(f"  {label:<12} {'—':<10} {'—':<9} {'':>11} "
+                                  f"{'':>11} {'':>11}  {resolution.reason[:42]}")
                         continue
 
                     resolved += 1
                     pair = resolution.best
                     verdict = await checker.check(
-                        resolution.mint, symbol=label,
-                        notional_usd=args.notional, limits=limits, pair=pair,
+                        resolution.mint, chain=resolution.chain or "solana",
+                        symbol=label, notional_usd=args.notional,
+                        limits=limits, pair=pair,
                     )
                     if verdict.tradable:
                         tradable += 1
@@ -985,16 +986,16 @@ def cmd_solana_check(args: argparse.Namespace) -> int:
                     if not args.brief:
                         rt = (f"{verdict.round_trip_pct:+.1f}%"
                               if verdict.round_trip_pct is not None else "—")
+                        chain = (resolution.chain or "?")[:10]
                         if pair:
-                            print(f"  {label:<14} {resolution.source:<9} "
+                            print(f"  {label:<12} {chain:<10} {resolution.source:<9} "
                                   f"${pair.liquidity_usd:>10,.0f} "
-                                  f"${pair.volume_h24:>10,.0f} "
-                                  f"{pair.txns_h24:>6} {rt:>11}  "
-                                  f"{verdict.verdict[:44]}")
+                                  f"${pair.volume_h24:>10,.0f} {rt:>11}  "
+                                  f"{verdict.verdict[:42]}")
                         else:
-                            print(f"  {label:<14} {resolution.source:<9} {'':>11} "
-                                  f"{'':>11} {'':>6} {rt:>11}  "
-                                  f"{verdict.verdict[:44]}")
+                            print(f"  {label:<12} {chain:<10} {resolution.source:<9} "
+                                  f"{'':>11} {'':>11} {rt:>11}  "
+                                  f"{verdict.verdict[:42]}")
                     await asyncio.sleep(args.pace)
 
                 checked = min(len(calls), args.limit)
@@ -1009,13 +1010,13 @@ def cmd_solana_check(args: argparse.Namespace) -> int:
                 else:
                     print(f"  · {history.name[:40]:<40} {safe}/{checked} usable")
 
-        _print_solana_ranking(ranking, args.notional)
+        _print_onchain_ranking(ranking, args.notional)
         return 0
 
     return asyncio.run(_go())
 
 
-def _print_solana_ranking(rows: List[Dict[str, Any]], notional: float) -> None:
+def _print_onchain_ranking(rows: List[Dict[str, Any]], notional: float) -> None:
     """Rank channels by what survives to a fill, and say where the rest died.
 
     A call can fail in two quite different places, and a single "usable" count
@@ -1522,8 +1523,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="skip checking symbols against the venue's listings")
     ins.set_defaults(func=cmd_inspect)
 
-    sc = sub.add_parser("solana-check",
-                        help="are a channel's calls tradable on Solana at all?")
+    sc = sub.add_parser("onchain-check", aliases=["solana-check"],
+                        help="are a channel's calls tradable on any chain?")
     sc.add_argument("--from-export", required=True, metavar="PATH")
     sc.add_argument("--channel", help="only channels whose name contains this")
     sc.add_argument("--days", type=int, default=30)
@@ -1538,7 +1539,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="seconds between tokens, to stay inside rate limits")
     sc.add_argument("--brief", action="store_true",
                     help="skip per-token detail and print only the channel ranking")
-    sc.set_defaults(func=cmd_solana_check)
+    sc.set_defaults(func=cmd_onchain_check)
 
     g = sub.add_parser("gate", help="show promotion-gate status")
     g.set_defaults(func=cmd_gate)

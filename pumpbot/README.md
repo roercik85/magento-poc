@@ -192,10 +192,10 @@ same pattern.
 `--min-confidence` overrides the threshold for one run, so you can see what a
 looser setting would admit before changing anything.
 
-### 3c. `solana-check` — are the calls tradable on chain at all?
+### 3c. `onchain-check` — are the calls tradable on any chain?
 
 ```bash
-pumpbot solana-check --from-export PATH --channel "gem signals" --notional 10
+pumpbot onchain-check --from-export PATH --channel "gem signals" --notional 10
 ```
 
 On a centralised venue the ticker *is* the instrument. On a DEX it is a claim:
@@ -203,6 +203,17 @@ anyone can mint a token with any name, and measured against the live chain
 while this was built, fourteen distinct mints call themselves HEDGE, seven call
 themselves EVE, and DexScreener's top result for "BONK" is a mint with $249M of
 claimed liquidity, $3.99 of daily volume and two trades in a day.
+
+**Every chain is searched, not one.** An earlier version checked Solana alone,
+because the channel said "on sol" — it also said "on Base", "on Rh" and "on
+Arc". Tokens it reported as having no market trade normally elsewhere: EVE's
+Solana pools are empty while it round trips at -1.2% on BSC and -2.9% on Base.
+Quoting is Jupiter for Solana and LI.FI for EVM chains, both keyless.
+
+A chain with no public router is reported **unquotable, never untradable**.
+HEDGE's largest market is Robinhood Chain with $260k of daily volume and
+nothing here can price it — that means look elsewhere for a router, not that
+there is no market.
 
 So resolution is contract-first. An address in the message names the token; a
 bare ticker resolves only when exactly one candidate shows real trading
@@ -440,7 +451,7 @@ risk/manager.py       cooldowns, concurrency, drawdown halt, channel filter
 strategy/pump.py      entry chase guard; stop / trailing / ladder / time exits
    ↓
 execution/            simulator.py | live_binance.py | live_kucoin.py
-marketdata/           feed.py (synthetic) | historical.py | kucoin.py | solana.py
+marketdata/           feed.py | historical.py | kucoin.py | onchain.py | chains.py
 risk/token_safety.py  round-trip quote: honeypot, tax and depth in one check
    ↓
 scoring/channels.py   hit rate, net median, originator, pre-post run
@@ -465,7 +476,7 @@ tell you this strategy prints money. It does not.
 ## Tests
 
 ```bash
-pytest -q        # 306 tests
+pytest -q        # 318 tests
 ```
 
 Covering parser precision (including the false positives that would fire market

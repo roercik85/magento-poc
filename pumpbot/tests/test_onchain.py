@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from pumpbot.marketdata.solana import SolanaTokens, TokenPair, _pair_from
+from pumpbot.marketdata.onchain import OnchainTokens, TokenPair, _pair_from
 from pumpbot.risk.token_safety import SafetyLimits, TokenSafetyChecker
 
 
@@ -84,7 +84,7 @@ def test_an_active_pair_is_not_flagged():
 def test_a_contract_address_is_taken_as_given():
     """It names the instrument, which is why the channels post them."""
     session = FakeSession({"/tokens/MINT1": {"pairs": [raw_pair("MINT1", "PEPE")]}})
-    r = run(SolanaTokens(session).resolve(contract="MINT1"))
+    r = run(OnchainTokens(session).resolve(contract="MINT1"))
     assert r.ok
     assert r.mint == "MINT1"
     assert r.source == "contract"
@@ -92,14 +92,14 @@ def test_a_contract_address_is_taken_as_given():
 
 def test_a_contract_with_no_pair_still_resolves_but_says_so():
     session = FakeSession({"/tokens/MINT1": {"pairs": []}})
-    r = run(SolanaTokens(session).resolve(contract="MINT1"))
+    r = run(OnchainTokens(session).resolve(contract="MINT1"))
     assert r.mint == "MINT1"
     assert "no DEX pair" in r.reason
 
 
 def test_a_unique_active_ticker_resolves():
     session = FakeSession({"/search": {"pairs": [raw_pair("MINT1", "PEPE")]}})
-    r = run(SolanaTokens(session).resolve(ticker="PEPE"))
+    r = run(OnchainTokens(session).resolve(ticker="PEPE"))
     assert r.ok
     assert r.mint == "MINT1"
 
@@ -110,7 +110,7 @@ def test_two_active_mints_under_one_ticker_is_ambiguous():
         raw_pair("MINT1", "HEDGE", vol=60_000.0),
         raw_pair("MINT2", "HEDGE", vol=55_000.0),
     ]}})
-    r = run(SolanaTokens(session).resolve(ticker="HEDGE"))
+    r = run(OnchainTokens(session).resolve(ticker="HEDGE"))
     assert not r.ok
     assert r.ambiguous
     assert r.mint is None
@@ -124,7 +124,7 @@ def test_many_inactive_mints_are_all_rejected():
         raw_pair(f"MINT{i}", "HEDGE", liq=8_000.0, vol=0.0, buys=1, sells=1)
         for i in range(14)
     ]}})
-    r = run(SolanaTokens(session).resolve(ticker="HEDGE"))
+    r = run(OnchainTokens(session).resolve(ticker="HEDGE"))
     assert not r.ok
     assert "14 mint(s)" in r.reason
 
@@ -135,18 +135,18 @@ def test_claimed_liquidity_alone_does_not_resolve_a_ticker():
     session = FakeSession({"/search": {"pairs": [
         raw_pair("FAKE", "BONK", liq=249_000_000.0, vol=3.99, buys=1, sells=1),
     ]}})
-    assert not run(SolanaTokens(session).resolve(ticker="BONK")).ok
+    assert not run(OnchainTokens(session).resolve(ticker="BONK")).ok
 
 
 def test_pairs_named_differently_are_ignored():
     session = FakeSession({"/search": {"pairs": [raw_pair("MINT1", "PEPECOIN")]}})
-    r = run(SolanaTokens(session).resolve(ticker="PEPE"))
+    r = run(OnchainTokens(session).resolve(ticker="PEPE"))
     assert not r.ok
-    assert "no Solana pair" in r.reason
+    assert "no pair on any chain" in r.reason
 
 
 def test_resolution_without_either_input():
-    r = run(SolanaTokens(FakeSession({})).resolve())
+    r = run(OnchainTokens(FakeSession({})).resolve())
     assert not r.ok
     assert "neither" in r.reason
 
@@ -157,7 +157,7 @@ def test_ohlcv_is_normalised_and_sorted():
         [1_700_000_120, 3.0, 3.1, 2.9, 3.05, 100.0],
         [1_700_000_060, 2.9, 3.0, 2.8, 3.0, 50.0],
     ]}}}})
-    rows = run(SolanaTokens(session).ohlcv("POOL"))
+    rows = run(OnchainTokens(session).ohlcv("POOL"))
     assert [r[0] for r in rows] == [1_700_000_060_000.0, 1_700_000_120_000.0]
     assert rows[0][4] == 3.0
 
@@ -167,7 +167,7 @@ def test_malformed_candles_are_skipped():
         [1_700_000_060, 2.9, 3.0, 2.8, 3.0, 50.0],
         ["bad"],
     ]}}}})
-    assert len(run(SolanaTokens(session).ohlcv("POOL"))) == 1
+    assert len(run(OnchainTokens(session).ohlcv("POOL"))) == 1
 
 
 # --------------------------------------------------------------------------
@@ -241,7 +241,7 @@ def test_price_impact_over_the_limit_fails():
 
 def test_thin_pair_metrics_fail_even_with_a_clean_quote():
     pair = TokenPair(
-        mint="MINT1", symbol="X", pair_address="P", dex="raydium",
+        mint="MINT1", chain="solana", symbol="X", pair_address="P", dex="raydium",
         price_usd=1.0, liquidity_usd=800.0, volume_h24=20.0, volume_h1=0.0,
         txns_h24=3, txns_h1=0, created_at_ms=None, price_change_h1=0.0,
     )
@@ -259,7 +259,7 @@ def test_a_brand_new_pool_is_rejected():
     import time
 
     pair = TokenPair(
-        mint="MINT1", symbol="X", pair_address="P", dex="raydium",
+        mint="MINT1", chain="solana", symbol="X", pair_address="P", dex="raydium",
         price_usd=1.0, liquidity_usd=50_000.0, volume_h24=50_000.0,
         volume_h1=5_000.0, txns_h24=500, txns_h1=50,
         created_at_ms=(time.time() - 300) * 1000.0, price_change_h1=0.0,
@@ -295,9 +295,9 @@ def row(name, *, calls=10, with_address=0, checked=10, resolved=None,
 
 
 def rank(rows, capsys, notional=10.0):
-    from pumpbot.cli import _print_solana_ranking
+    from pumpbot.cli import _print_onchain_ranking
 
-    _print_solana_ranking(rows, notional)
+    _print_onchain_ranking(rows, notional)
     return capsys.readouterr().out
 
 
@@ -402,3 +402,151 @@ def test_a_higher_edge_needs_fewer_trades(capsys):
     needed = [int(n.replace(",", ""))
               for n in re.findall(r"needs ([\d,]+) trades", out)]
     assert needed == sorted(needed)          # 3% edge first, then 2%, then 1%
+
+
+# --------------------------------------------------------------------------
+# multi-chain: the bug that reported tradable tokens as dead
+# --------------------------------------------------------------------------
+def test_pairs_on_every_chain_are_searched():
+    """The first version filtered to Solana because the channel said "on sol".
+    It also said "on Base" and "on Rh", and EVE's Solana pools are empty while
+    it round trips at -1.2% on BSC."""
+    session = FakeSession({"/search": {"pairs": [
+        raw_pair("SOLMINT", "EVE", vol=0.0, buys=0, sells=0) | {"chainId": "solana"},
+        raw_pair("0xBSC", "EVE", vol=13_652.0) | {"chainId": "bsc"},
+    ]}})
+    r = run(OnchainTokens(session).resolve(ticker="EVE"))
+    assert r.ok
+    assert r.mint == "0xBSC"
+    assert r.chain == "bsc"
+
+
+def test_the_chain_is_reported_for_a_contract_resolution():
+    session = FakeSession({"/tokens/0xABC": {"pairs": [
+        raw_pair("0xABC", "EVE") | {"chainId": "base"},
+    ]}})
+    r = run(OnchainTokens(session).resolve(contract="0xABC"))
+    assert r.chain == "base"
+
+
+def test_the_reason_counts_chains_not_just_mints():
+    session = FakeSession({"/search": {"pairs": [
+        raw_pair(f"M{i}", "HEDGE", vol=0.0, buys=1, sells=0) | {"chainId": c}
+        for i, c in enumerate(["solana", "bsc", "base", "ethereum"])
+    ]}})
+    r = run(OnchainTokens(session).resolve(ticker="HEDGE"))
+    assert "4 chain(s)" in r.reason
+
+
+# --- chain registry --------------------------------------------------------
+def test_known_chains_are_quotable():
+    from pumpbot.marketdata.chains import get_chain, is_quotable
+
+    for name in ("solana", "ethereum", "bsc", "base"):
+        assert is_quotable(name), name
+    assert get_chain("bsc").kind == "evm"
+    assert get_chain("solana").kind == "solana"
+
+
+def test_bnb_chain_usdc_has_eighteen_decimals():
+    """Assuming six produces a quote for a millionth of the size, which routes
+    perfectly and means nothing."""
+    from pumpbot.marketdata.chains import get_chain
+
+    assert get_chain("bsc").usdc_decimals == 18
+    assert get_chain("base").usdc_decimals == 6
+
+
+def test_chains_without_a_public_router_are_not_quotable():
+    from pumpbot.marketdata.chains import describe_unquotable, is_quotable
+
+    assert not is_quotable("robinhood")
+    assert not is_quotable("arc")
+    assert not is_quotable(None)
+    why = describe_unquotable("robinhood")
+    assert "unreachable" in why
+
+
+def test_unquotable_is_not_reported_as_untradable():
+    """HEDGE's biggest market is Robinhood Chain with $260k of daily volume.
+    Calling that "no market" is how tradable tokens were reported as dead."""
+    chk = TokenSafetyChecker(FakeSession({}))
+    v = run(chk.check("0xABC", chain="robinhood", notional_usd=10.0))
+    assert not v.quotable
+    assert not v.safe
+    assert "UNQUOTABLE" in v.verdict
+    assert "UNTRADABLE" not in v.verdict
+
+
+def test_the_right_quoter_is_chosen_per_chain():
+    from pumpbot.marketdata.chains import get_chain
+    from pumpbot.risk.token_safety import JupiterQuoter, LifiQuoter
+
+    chk = TokenSafetyChecker(FakeSession({}))
+    assert isinstance(chk.quoter_for(get_chain("solana")), JupiterQuoter)
+    assert isinstance(chk.quoter_for(get_chain("base")), LifiQuoter)
+    assert chk.quoter_for(get_chain("robinhood")) is None
+
+
+# --- LI.FI quoting ---------------------------------------------------------
+def lifi_session(*, usdc_decimals=6, token_decimals=18, buy=None, sell=None):
+    def token(params):
+        addr = (params.get("token") or "").lower()
+        if addr.startswith("0x833589") or addr.startswith("0x8ac76a"):
+            return {"decimals": usdc_decimals, "symbol": "USDC"}
+        if token_decimals is None:
+            return {"message": "Could not find token"}
+        return {"decimals": token_decimals, "symbol": "TKN"}
+
+    def quote(params):
+        selling = (params.get("fromToken") or "").lower().startswith("0xdead")
+        payload = sell if selling else buy
+        return {"estimate": payload} if payload else {"message": "no route"}
+
+    return FakeSession({"/token": token, "/quote": quote})
+
+
+def test_lifi_round_trip_is_measured():
+    from pumpbot.marketdata.chains import get_chain
+    from pumpbot.risk.token_safety import LifiQuoter
+
+    session = lifi_session(
+        buy={"toAmount": "1000000000000000000"},
+        sell={"toAmount": "9800000"},
+    )
+    rt = run(LifiQuoter(session).round_trip(get_chain("base"), "0xdeadbeef", 10.0, 300))
+    assert rt.bought and rt.sold
+    assert rt.round_trip_pct == pytest.approx(-2.0)
+
+
+def test_lifi_reports_an_unknown_token_rather_than_guessing():
+    from pumpbot.marketdata.chains import get_chain
+    from pumpbot.risk.token_safety import LifiQuoter
+
+    session = lifi_session(token_decimals=None)
+    rt = run(LifiQuoter(session).round_trip(get_chain("base"), "0xdeadbeef", 10.0, 300))
+    assert not rt.bought
+    assert "unknown to the aggregator" in rt.error
+
+
+def test_lifi_catches_a_honeypot():
+    from pumpbot.marketdata.chains import get_chain
+    from pumpbot.risk.token_safety import LifiQuoter
+
+    session = lifi_session(buy={"toAmount": "1000000000000000000"}, sell=None)
+    rt = run(LifiQuoter(session).round_trip(get_chain("bsc"), "0xdeadbeef", 10.0, 300))
+    assert rt.bought and not rt.sold
+
+
+def test_lifi_uses_the_chains_own_usdc_decimals():
+    """BNB Chain's USDC has 18 decimals where most chains have 6."""
+    from pumpbot.marketdata.chains import get_chain
+    from pumpbot.risk.token_safety import LifiQuoter
+
+    session = lifi_session(usdc_decimals=18,
+                           buy={"toAmount": "5"}, sell={"toAmount": "5"})
+    run(LifiQuoter(session).round_trip(get_chain("bsc"), "0xdeadbeef", 10.0, 300))
+    buy_call = [c for c in session.calls
+                if "quote" in c[0] and not
+                (c[1].get("fromToken") or "").lower().startswith("0xdead")][0]
+    assert buy_call[1]["fromAmount"] == str(10 * 10 ** 18)

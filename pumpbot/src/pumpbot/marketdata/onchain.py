@@ -1,4 +1,4 @@
-"""Solana token resolution and market data.
+"""On-chain token resolution and market data, across every chain.
 
 **The central problem is identity, not price.** Anyone can mint a token with
 any name. Searching DexScreener for "HEDGE" returns fourteen different mints
@@ -20,6 +20,13 @@ instrument:
 Claimed liquidity is the number every scam optimises, because it is the number
 every dashboard shows. Volume and transaction count are harder to fake and
 cost the faker real money, so those are what this trusts.
+
+**And the token is looked for on every chain, not one.** An earlier version of
+this searched Solana alone, because the channel said "on sol" — it also said
+"on Base", "on Rh" and "on Arc". Tokens reported as having no market turned out
+to trade normally elsewhere: EVE's Solana pools are empty while it round trips
+at -1.2% on BSC. Picking a chain in advance and reporting the result as though
+it were about the token is the error this now avoids.
 """
 from __future__ import annotations
 
@@ -30,18 +37,15 @@ from typing import Any, Dict, List, Optional, Tuple
 DEXSCREENER = "https://api.dexscreener.com"
 GECKOTERMINAL = "https://api.geckoterminal.com/api/v2"
 
-# Solana mint addresses are base58 and 32-44 characters. WSOL and USDC are the
-# quote assets worth routing through.
 WSOL = "So11111111111111111111111111111111111111112"
-USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-USDC_DECIMALS = 6
 
 
 @dataclass(slots=True)
 class TokenPair:
-    """One trading pair as the aggregator sees it."""
+    """One trading pair as the aggregator sees it, on a named chain."""
 
     mint: str
+    chain: str
     symbol: str
     pair_address: str
     dex: str
@@ -77,6 +81,7 @@ class Resolution:
     mint: Optional[str]
     symbol: str
     source: str                      # "contract" | "ticker" | "none"
+    chain: Optional[str] = None
     best: Optional[TokenPair] = None
     candidates: List[TokenPair] = field(default_factory=list)
     ambiguous: bool = False
@@ -107,6 +112,7 @@ def _pair_from(payload: Dict[str, Any]) -> Optional[TokenPair]:
 
     return TokenPair(
         mint=mint,
+        chain=(payload.get("chainId") or "").lower(),
         symbol=(base.get("symbol") or "").upper(),
         pair_address=payload.get("pairAddress") or "",
         dex=payload.get("dexId") or "",
@@ -121,7 +127,7 @@ def _pair_from(payload: Dict[str, Any]) -> Optional[TokenPair]:
     )
 
 
-class SolanaTokens:
+class OnchainTokens:
     """Resolves tokens and reads their market data."""
 
     def __init__(self, session, dexscreener: str = DEXSCREENER) -> None:  # noqa: ANN001
@@ -149,6 +155,7 @@ class SolanaTokens:
         return pairs
 
     async def search_ticker(self, ticker: str) -> List[TokenPair]:
+        """Pairs on any chain whose base token carries exactly this symbol."""
         try:
             async with self._session.get(
                 f"{self._base}/latest/dex/search", params={"q": ticker}
@@ -158,8 +165,6 @@ class SolanaTokens:
             return []
         out: List[TokenPair] = []
         for raw in payload.get("pairs") or []:
-            if raw.get("chainId") != "solana":
-                continue
             pair = _pair_from(raw)
             if pair is not None and pair.symbol == ticker.upper():
                 out.append(pair)
@@ -191,9 +196,10 @@ class SolanaTokens:
                 mint=contract,
                 symbol=best.symbol if best else (ticker or "").upper(),
                 source="contract",
+                chain=best.chain if best else None,
                 best=best,
                 candidates=pairs,
-                reason="" if pairs else "no DEX pair found for this mint",
+                reason="" if pairs else "no DEX pair found for this address",
             )
 
         if not ticker:
@@ -203,7 +209,7 @@ class SolanaTokens:
         candidates = await self.search_ticker(ticker)
         if not candidates:
             return Resolution(mint=None, symbol=ticker.upper(), source="ticker",
-                              reason=f"no Solana pair named {ticker}")
+                              reason=f"no pair on any chain named {ticker}")
 
         # Rank on activity, not on claimed liquidity: depth is the number a
         # scam inflates, and transactions are the number it cannot.
@@ -211,16 +217,20 @@ class SolanaTokens:
             p for p in candidates
             if p.volume_h24 >= min_volume_h24 and p.txns_h24 >= min_txns_h24
         ]
+        # A token bridged to several chains is one token, not several, so
+        # identity is judged on the mint rather than on the (chain, mint) pair.
         distinct_mints = {p.mint for p in active}
 
         if not active:
             total = len({p.mint for p in candidates})
+            chains = sorted({p.chain for p in candidates if p.chain})
             return Resolution(
                 mint=None, symbol=ticker.upper(), source="ticker",
                 candidates=candidates,
                 reason=(
-                    f"{total} mint(s) use this ticker and none trades enough to "
-                    f"identify itself (need ${min_volume_h24:,.0f} 24h volume and "
+                    f"{total} mint(s) across {len(chains)} chain(s) use this "
+                    f"ticker and none trades enough to identify itself "
+                    f"(need ${min_volume_h24:,.0f} 24h volume and "
                     f"{min_txns_h24} transactions)"
                 ),
             )
@@ -237,7 +247,7 @@ class SolanaTokens:
             )
 
         return Resolution(mint=best.mint, symbol=ticker.upper(), source="ticker",
-                          best=best, candidates=active)
+                          chain=best.chain, best=best, candidates=active)
 
     # -- history --------------------------------------------------------
     async def ohlcv(
@@ -247,6 +257,7 @@ class SolanaTokens:
         minutes: int = 1,
         limit: int = 300,
         before_ts: Optional[int] = None,
+        chain: str = "solana",
         gecko: str = GECKOTERMINAL,
     ) -> List[Tuple[float, float, float, float, float]]:
         """One-minute candles for a pool, as ``(t_ms, open, high, low, close)``.
@@ -259,7 +270,8 @@ class SolanaTokens:
             params["before_timestamp"] = before_ts
         try:
             async with self._session.get(
-                f"{gecko.rstrip('/')}/networks/solana/pools/{pair_address}/ohlcv/minute",
+                f"{gecko.rstrip('/')}/networks/{chain}/pools/{pair_address}"
+                f"/ohlcv/minute",
                 params=params,
             ) as resp:
                 payload = await resp.json()
