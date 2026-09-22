@@ -492,6 +492,7 @@ def cmd_triage(args: argparse.Namespace) -> int:
         if cfg.marketdata.venue == "binance":
             from .marketdata.binance import BinanceSymbols as VenueSymbols
             from .marketdata.binance import fetch_klines as venue_fetch_klines
+            from .marketdata.binance import pick_data_base
         else:
             from .marketdata.kucoin import KucoinSymbols as VenueSymbols
             from .marketdata.kucoin import fetch_klines as venue_fetch_klines
@@ -581,9 +582,18 @@ def cmd_triage(args: argparse.Namespace) -> int:
         # counts calls that could actually be traded here rather than every
         # regex hit. Prose false positives would otherwise inflate a channel's
         # call rate and can reject it for volume it never had.
+        data_base = cfg.marketdata.rest_base
         async with aiohttp.ClientSession() as session:
-            symbols = await VenueSymbols.load(session, cfg.marketdata.rest_base)
-        print(f"\n▸ {len(symbols)} symbols listed on {cfg.marketdata.venue}")
+            if cfg.marketdata.venue == "binance":
+                # Prefer the full host when this machine can reach it; the
+                # public mirror carries fewer symbols and silently drops calls.
+                data_base, note = await pick_data_base(session)
+                if note:
+                    print(f"\n⚠ {note}")
+                else:
+                    print(f"\n▸ market data from {data_base}")
+            symbols = await VenueSymbols.load(session, data_base)
+        print(f"▸ {len(symbols)} symbols listed on {cfg.marketdata.venue}")
 
         def is_tradable(symbol: str) -> bool:
             return symbols.resolve(symbol) is not None
@@ -668,7 +678,7 @@ def cmd_triage(args: argparse.Namespace) -> int:
                 # which cannot see a thirty-second spike at all.
                 await venue_fetch_klines(
                     session, pairs, prices_path,
-                    base=cfg.marketdata.rest_base,
+                    base=data_base,
                     spike_before_s=min(args.before, 1_800),
                     spike_after_s=args.after,
                     lookback_days=max(args.before // 86_400, 3),
@@ -706,6 +716,8 @@ def cmd_triage(args: argparse.Namespace) -> int:
         print()
         for c in result.channel_scores:
             print(f"  {c.name}: {c.verdict}")
+
+        _print_pre_run_table(result.channel_scores)
 
         clusters = runner.engine.scorer.overlap_clusters()
         if clusters:
@@ -1055,6 +1067,56 @@ def cmd_onchain_check(args: argparse.Namespace) -> int:
         return 0
 
     return asyncio.run(_go())
+
+
+def _print_pre_run_table(scores) -> None:                # noqa: ANN001
+    """How far each channel's calls had already moved before the post.
+
+    The single most decisive number in the whole tool, and it needs more than
+    one window. Five minutes cannot see organised accumulation, which starts
+    days ahead; three days alone cannot separate it from ordinary drift. A
+    call flat over five minutes and up 80% over three days was positioned long
+    before anyone was told about it.
+    """
+    rows = [c for c in scores if getattr(c, "pre_run_windows", None)]
+    if not rows:
+        return
+
+    windows = sorted({w for c in rows for w in c.pre_run_windows})
+
+    def label(seconds: int) -> str:
+        if seconds < 3_600:
+            return f"{seconds // 60}m"
+        if seconds < 86_400:
+            return f"{seconds // 3_600}h"
+        return f"{seconds // 86_400}d"
+
+    print("\n▸ how far the price had ALREADY moved before the call "
+          "(median per channel)")
+    print(f"  {'channel':<30} " + " ".join(f"{label(w):>8}" for w in windows))
+    print("  " + "-" * (30 + 9 * len(windows)))
+    for c in rows:
+        cells = [
+            f"{c.pre_run_windows[w]:>+7.1f}%" if w in c.pre_run_windows
+            else f"{'—':>8}"
+            for w in windows
+        ]
+        print(f"  {c.name[:30]:<30} " + " ".join(cells))
+
+    worst = max(
+        (c for c in rows if c.pre_run_windows),
+        key=lambda c: max(c.pre_run_windows.values()),
+    )
+    peak = max(worst.pre_run_windows.values())
+    if peak >= 20.0:
+        print(f"\n  {worst.name} calls things already up {peak:.0f}% before it "
+              f"posts.\n  Being faster than other readers does not help against "
+              f"somebody who bought that\n  much earlier — the post is the exit, "
+              f"not the entry.")
+    else:
+        print("\n  No large pre-post run at any window. Whatever these calls are, "
+              "they are\n  not being front-run on this venue before the message "
+              "lands.")
 
 
 def _print_onchain_ranking(rows: List[Dict[str, Any]], notional: float) -> None:

@@ -201,3 +201,58 @@ def test_a_channel_with_no_observations_is_ignored():
         s.observe(obs(-1, "a", f"SYM{i}", 2.0))
         s.observe(obs(-2, "b", f"SYM{i}", 2.0))
     assert len(s.overlap_clusters()[0]) == 2
+
+
+# --- the pre-post run table ------------------------------------------------
+def scored(name, windows):
+    from pumpbot.models import ScoredChannel
+
+    return ScoredChannel(
+        chat_id=-1, name=name, signals=20, hit_rate=0.3, median_return_pct=-0.9,
+        mean_return_pct=0.1, median_mae_pct=-1.0, originator_score=0.6,
+        consistency=0.5, pre_pump_pct=windows.get(300, 0.0),
+        pre_run_windows=windows, best_horizon_s=30, best_horizon_return_pct=1.0,
+        composite=0.4, verdict="x",
+    )
+
+
+def test_pre_run_table_flags_a_distributing_channel(capsys):
+    """A call flat over five minutes and up 84% over three days was positioned
+    long before anyone was told about it."""
+    from pumpbot.cli import _print_pre_run_table
+
+    _print_pre_run_table([
+        scored("distributor", {300: 0.4, 86_400: 38.0, 259_200: 84.0}),
+    ])
+    out = capsys.readouterr().out
+    assert "+84.0%" in out
+    assert "already up 84%" in out
+    assert "the post is the exit" in out
+
+
+def test_pre_run_table_says_so_when_there_is_no_front_running(capsys):
+    from pumpbot.cli import _print_pre_run_table
+
+    _print_pre_run_table([scored("clean", {300: 0.1, 86_400: 1.2, 259_200: 2.0})])
+    out = capsys.readouterr().out
+    assert "No large pre-post run" in out
+    assert "the post is the exit" not in out
+
+
+def test_pre_run_table_is_skipped_without_windows(capsys):
+    from pumpbot.cli import _print_pre_run_table
+
+    _print_pre_run_table([scored("nodata", {})])
+    assert capsys.readouterr().out == ""
+
+
+def test_pre_run_table_handles_channels_with_different_windows(capsys):
+    from pumpbot.cli import _print_pre_run_table
+
+    _print_pre_run_table([
+        scored("a", {300: 1.0, 259_200: 50.0}),
+        scored("b", {300: 2.0}),
+    ])
+    out = capsys.readouterr().out
+    assert "—" in out          # b has no 3d value
+    assert "+50.0%" in out

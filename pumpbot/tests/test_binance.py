@@ -189,3 +189,44 @@ def test_unlisted_symbols_are_not_fetched(tmp_path):
                      symbols=BinanceSymbols.from_payload(info("XUSDT")),
                      lookback_days=0))
     assert session.intervals == []
+
+
+# --- choosing the market-data host ----------------------------------------
+def test_the_full_host_is_preferred_when_reachable():
+    from pumpbot.marketdata.binance import pick_data_base
+
+    class Session:
+        def get(self, url):
+            return Resp({}, status=200)
+
+    base, note = run(pick_data_base(Session()))
+    assert "api.binance.com" in base
+    assert note == ""
+
+
+def test_a_geo_block_falls_back_and_says_what_it_costs():
+    """The mirror's prices are current but its symbol list is smaller, and a
+    symbol it lacks is absent from klines too — so a call naming one is
+    dropped as unlisted rather than priced."""
+    from pumpbot.marketdata.binance import pick_data_base
+
+    class Session:
+        def get(self, url):
+            return Resp({}, status=451)
+
+    base, note = run(pick_data_base(Session()))
+    assert "binance.vision" in base
+    assert "451" in note
+    assert "smaller" in note
+
+
+def test_a_network_failure_also_falls_back():
+    from pumpbot.marketdata.binance import pick_data_base
+
+    class Session:
+        def get(self, url):
+            raise OSError("no route to host")
+
+    base, note = run(pick_data_base(Session()))
+    assert "binance.vision" in base
+    assert "OSError" in note

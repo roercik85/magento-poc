@@ -51,6 +51,41 @@ _PACE_S = 0.12
 _MAX_PAGES = 40
 
 
+async def pick_data_base(
+    session,                                     # noqa: ANN001
+    *,
+    preferred: str = TRADE_BASE,
+    fallback: str = DATA_BASE,
+) -> Tuple[str, str]:
+    """Choose the market-data host, preferring the full one.
+
+    ``api.binance.com`` carries every listed symbol but answers HTTP 451 from
+    a number of jurisdictions. ``data-api.binance.vision`` answers from
+    anywhere and its prices are current — but its symbol universe is smaller,
+    and a symbol it lacks is absent from both exchangeInfo *and* klines.
+
+    Defaulting to the mirror because the machine writing this code cannot
+    reach the main host made the analysis silently worse on a machine that
+    can: calls naming symbols the mirror omits were dropped as "not listed",
+    which is the same class of error as measuring Binance channels on KuCoin.
+
+    Returns ``(base, note)``; the note is empty when the full host was used.
+    """
+    try:
+        async with session.get(f"{preferred.rstrip('/')}/api/v3/ping") as resp:
+            if resp.status == 200:
+                return preferred, ""
+            status = resp.status
+    except Exception as exc:                     # noqa: BLE001
+        status = f"{type(exc).__name__}"
+
+    return fallback, (
+        f"{preferred} is unreachable here ({status}); using {fallback}, whose "
+        f"prices are current but whose symbol list is smaller — some calls may "
+        f"be dropped as unlisted that the main host would price"
+    )
+
+
 class BinanceSymbols:
     """Tradable symbols and their filters."""
 
